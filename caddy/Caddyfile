@@ -1,5 +1,4 @@
-# replace with your real subdomain
-sms.supamilatai.com {
+sms.supamiltai.com {
     encode gzip
     reverse_proxy app:8000
 }
