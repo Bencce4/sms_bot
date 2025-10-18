@@ -20,6 +20,10 @@ provider = SmsProvider(dry_run=DRY_RUN)
 def healthz():
     return {"ok": True}
 
+@app.head("/healthz")
+def healthz_head():
+    return {}
+
 def within_business_hours() -> bool:
     if os.getenv("SKIP_BUSINESS_HOURS") == "1":
         return True
