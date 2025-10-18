@@ -1,6 +1,4 @@
-# app/services/llm.py
 import os, json, re
-from datetime import datetime
 from typing import List, Dict, Any
 from sqlalchemy import desc
 
@@ -8,58 +6,30 @@ from openai import OpenAI
 from app.storage.db import SessionLocal
 from app.storage.models import Thread, Message
 
-MODEL = os.getenv("LLM_MODEL", "gpt-5-mini")
+# ✅ Use a real model; default to gpt-4o-mini
+MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-SYSTEM_LT = (
-    "Tu – mandagus, šiltas, trumpai rašantis lietuvių kalbos asistentas, bendraujantis kaip žmogus, "
-    "be šablonų. Nenaudok emoji. Vienas tikslas: užmegzti žmogišką pokalbį apie darbą, "
-    "užduoti natūralų kitą klausimą, arba mandagiai užbaigti, jei žmogus nebesidomi."
+def _call(messages):
+    # Keep it simple; no temperature/max_tokens (some models reject non-defaults)
+    return client.chat.completions.create(model=MODEL, messages=messages)
+
+SYSTEM_PROMPT = (
+    "Tu – žmogiškai bendraujantis, draugiškas Lietuvos įmonės recruiter'is. "
+    "Rašai kaip per SMS: trumpai, aiškiai, be biurokratijos, be šablonų. "
+    "Tonas: mandagus, šiltas, šnekamas, truputį iniciatyvus (bet ne įkyrus). "
+    "Tikslas: mandagiai išsiaiškinti ar žmogus DOMISI darbu; jei taip – paklausti MIESTO ir PATIRTIES metais; "
+    "jei žmogus abejoja – pasiūlyk trumpai papasakoti, kas svarbu (pvz., grafikas, atlygis); "
+    "jei žmogus aiškiai nebedomina / nenori – padėkok ir užbaik pokalbį. "
+    "Nieko nekurk apie poziciją/įmonę, jei kontekste to nėra. "
+    "Atsakymas ≤160 simbolių. Viena žinutė. Be kreipimosi vardu, jei jo pats žmogus neįvardijo."
 )
 
 FEWSHOTS = [
-    # not interested
-    {
-        "role": "user", "content": "ne, nedomina"
-    },
-    {
-        "role": "assistant",
-        "content": '{"intent":"not_interested","reply":"Supratau, daugiau netrukdysiu. Jei persigalvotumėte – parašykite. Gražios dienos!"}'
-    },
-    # wants info
-    {
-        "role": "user", "content": "domina, ką reikia daryti?"
-    },
-    {
-        "role": "assistant",
-        "content": '{"intent":"questions","reply":"Faina! Kuriame mieste ieškote ir kiek turite patirties (apytiksliai metais)?"}'
-    },
-    # small-talk/unsure
-    {
-        "role": "user", "content": "gal šiek tiek"
-    },
-    {
-        "role": "assistant",
-        "content": '{"intent":"maybe","reply":"Supratau. Kuris miestas jums patogus ir kokios srities darbo labiau norėtumėte?"}'
-    },
+    {"user": "Gal būtų darbo?", "assistant": "Puiku! Kuris miestas būtų patogu ir kiek metų patirties turite?"},
+    {"user": "Nežinau, gal šiek tiek.", "assistant": "Suprantu. Kas svarbiausia: miestas, grafikas ar atlygis? Jei tinka, parašykite miestą ir patirtį metais."},
+    {"user": "Nedomina, ačiū.", "assistant": "Ačiū už žinutę, daugiau neberašysiu. Gražios dienos!"},
 ]
-
-INTENT_STOP_SET = {"stop","not_interested","unsubscribe","do_not_contact","no"}
-
-def _as_json(text: str) -> Dict[str, Any]:
-    """Extract a JSON object from model output, tolerate stray text."""
-    m = re.search(r'\{.*\}', text, flags=re.S)
-    if not m:
-        return {"intent":"questions","reply":"Gal galite parašyti miestą ir kiek turite patirties (metais)?"}
-    try:
-        data = json.loads(m.group(0))
-        if "reply" not in data:  # safety
-            data["reply"] = "Gal galite parašyti miestą ir kiek turite patirties (metais)?"
-        if "intent" not in data or not data["intent"]:
-            data["intent"] = "questions"
-        return data
-    except Exception:
-        return {"intent":"questions","reply":"Gal galite parašyti miestą ir kiek turite patirties (metais)?"}
 
 def _thread_history(phone: str, limit: int = 6) -> List[Dict[str,str]]:
     db = SessionLocal()
@@ -80,31 +50,50 @@ def _thread_history(phone: str, limit: int = 6) -> List[Dict[str,str]]:
     finally:
         db.close()
 
-def classify_and_reply_lt(phone: str, latest_user_text: str) -> Dict[str, Any]:
-    """
-    Returns: {"intent": "...", "reply": "..."}
-    Works with gpt-5-mini (no temperature / max_tokens).
-    """
-    messages = [{"role":"system","content":SYSTEM_LT}]
-    messages += FEWSHOTS
-    # short instruction for JSON output
-    messages.append({
-        "role":"system",
-        "content":"Atsakyk **tik** vienu JSON objektu: {\"intent\":\"...\",\"reply\":\"...\"}. Be jokių paaiškinimų."
-    })
-    messages += _thread_history(phone)
-    messages.append({"role":"user","content": latest_user_text.strip()})
+def _build_messages(ctx: dict, text: str):
+    msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
+    # include last turns so the bot sounds consistent
+    if ctx and ctx.get("msisdn"):
+        msgs += _thread_history(ctx["msisdn"], limit=6)
+    for ex in FEWSHOTS:
+        msgs.append({"role": "user", "content": ex["user"]})
+        msgs.append({"role": "assistant", "content": ex["assistant"]})
+    ctx_str = ""
+    if ctx:
+        safe = {k: v for k, v in ctx.items() if k in ("msisdn", "campaign", "role") and v}
+        if safe:
+            ctx_str = f"Kontekstas: {safe}. "
+    msgs.append({"role": "user", "content": f"{ctx_str}Žinutė: {text}"})
+    return msgs
 
-    resp = client.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        # no temperature/max_tokens for gpt-5-mini
+def generate_reply_lt(ctx: dict, text: str) -> str:
+    r = _call(_build_messages(ctx, text))
+    return (r.choices[0].message.content or "").strip()
+
+def classify_lt(text: str) -> dict:
+    sys = (
+        "Klasifikuok lietuvišką SMS į: 'questions', 'not_interested', arba 'other'. "
+        "Grąžink JSON: {\"intent\": str, \"confidence\": 0..1}. "
+        "Pavyzdžiai:\n"
+        "- \"nedomina\", \"ne, ačiū\", \"nenoriu\" -> not_interested\n"
+        "- klausimai apie darbą -> questions\n"
+        "- kita -> other\n"
+        "Atsakyk tik JSON."
     )
-    text = resp.choices[0].message.content or ""
-    data = _as_json(text)
-    # normalize intent
-    intent = (data.get("intent") or "").strip().lower()
-    if intent in {"ne", "nedomina"}:
-        intent = "not_interested"
-    data["intent"] = intent
-    return data
+    r = _call([
+        {"role": "system", "content": sys},
+        {"role": "user", "content": text},
+    ])
+    content = (r.choices[0].message.content or "").strip()
+    try:
+        obj = json.loads(content)
+        intent = (obj.get("intent") or "").lower().strip()
+        conf = float(obj.get("confidence") or 0.6)
+        if intent not in {"questions", "not_interested", "other"}:
+            intent = "other"
+        return {"intent": intent, "confidence": conf}
+    except Exception:
+        tl = text.lower()
+        if any(w in tl for w in ["nedomina", "nenoriu", "ačiū, ne", "aciu ne", " ne", "ne."]):
+            return {"intent": "not_interested", "confidence": 0.8}
+        return {"intent": "other", "confidence": 0.5}
