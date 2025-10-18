@@ -143,9 +143,6 @@ async def mo(req: Request):
 
 @app.post("/webhooks/mo")
 async def mo(req: Request):
-    """
-    Simulate inbound SMS (MO). POST e.g. {"msisdn":"3706...","message":"domina"}
-    """
     payload = await req.json()
     mo = provider.parse_mo(payload, req.headers)
     text = (mo.get("text") or "").strip()
@@ -153,42 +150,50 @@ async def mo(req: Request):
 
     db = SessionLocal()
     try:
-        # ensure contact & thread
+        # ensure contact/thread
         c = db.query(Contact).filter_by(phone=mo["from"]).first()
         if not c:
-            c = Contact(phone=mo["from"])
-            db.add(c)
-
+            c = Contact(phone=mo["from"]); db.add(c)
         t = db.query(Thread).filter_by(phone=mo["from"], status="open").first()
         if not t:
-            t = Thread(phone=mo["from"])
-            db.add(t)
-            db.flush()
+            t = Thread(phone=mo["from"]); db.add(t); db.flush()
 
-        # store inbound message
+        # store inbound
         db.add(Message(thread_id=t.id, dir="in", body=text, status="delivered"))
+        db.commit()
 
-        # STOP / DNC handling
-        if text_l in {"stop", "ne", "atsisakyti", "nedomina"}:
-            c.dnc = True
-            db.commit()
-            # confirm to the user (still dry-run in Milestone 0)
-            await provider.send(mo["from"], "Sustabdyta. Dėkojame. (Atsisakėte pranešimų)", userref="dnc-confirm")
-            print("[DNC] Marked contact as DNC and sent confirm.")
+        # EARLY DNC guard: if contact is already DNC, stop here
+        if c.dnc:
+            return {"ok": True, "ignored":"dnc"}
+
+        # Optional keyword DNC (env-based, can be empty)
+        raw = os.getenv("DNC_PHRASES","")
+        dnc_phrases = {p.strip().lower() for p in raw.split(",") if p.strip()}
+        if dnc_phrases and text_l in dnc_phrases:
+            c.dnc = True; db.commit()
+            await provider.send(mo["from"], "Supratau – daugiau netrukdysime. Gražios dienos!", userref="dnc-goodbye")
             return {"ok": True, "dnc": True}
 
-        # otherwise: classify & (in milestone 0) just log the would-be reply
-        db.commit()
+        # LLM classify & reply
+        from app.services.llm import classify_and_reply_lt, INTENT_STOP_SET
+        res = classify_and_reply_lt(mo["from"], text)
+        intent = (res.get("intent") or "").lower()
+        reply  = (res.get("reply") or "").strip()
+
+        if intent in INTENT_STOP_SET:
+            c.dnc = True; db.commit()
+            await provider.send(mo["from"], "Supratau – daugiau netrukdysime. Gražios dienos!", userref="dnc-goodbye")
+            return {"ok": True, "intent": intent, "dnc": True}
+
+        # send natural reply
+        if reply:
+            await provider.send(mo["from"], reply, userref="llm-reply")
+            db.add(Message(thread_id=t.id, dir="out", body=reply, status="sent"))
+            db.commit()
+
+        return {"ok": True, "intent": intent, "reply": reply}
     finally:
         db.close()
-
-    cls = classify_lt(text)
-    if cls["intent"] in {"not_interested", "wrong_contact"}:
-        print("[AUTO-REPLY] LT: Ačiū, pažymėjau. Daugiau neberašysime.")
-    else:
-        print("[AUTO-REPLY] LT: Gal galite parašyti miestą ir patirtį (metais)?")
-
-    return {"ok": True, "intent": cls["intent"], "confidence": cls["confidence"]}
 
 
 @app.post("/send-batch")
