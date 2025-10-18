@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 dev.db
 .env*
+.env
+.env.*

@@ -1,15 +1,18 @@
-version: "3.9"
-
+# (you can remove the "version" line — v2 ignores it and warns)
 services:
   app:
-    build: ./app
+    build: ./app                # expects app/Dockerfile
     env_file:
-      - ./.env.prod          # change to .env.dev when running locally with Docker
+      - ./.env.prod
+    environment:
+      PYTHONPATH: /srv          # <— add this so "import app" works
+    # Optional in dev for hot code edits:
+    # volumes:
+    #   - ./app:/srv/app:ro
     depends_on:
       - db
     networks: [internal]
     restart: always
-    # app listens on 8000 internally; Caddy will proxy it
 
   db:
     image: postgres:16
