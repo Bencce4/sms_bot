@@ -81,59 +81,64 @@ from app.services.llm import classify_lt, generate_reply_lt
 
 @app.post("/webhooks/mo")
 async def mo(req: Request):
+    """
+    Simulate inbound SMS (MO). POST e.g. {"msisdn":"3706...","message":"domina"}
+    """
     payload = await req.json()
     mo = provider.parse_mo(payload, req.headers)
-    text = (mo.get("text") or "").trim() if hasattr(str, "trim") else (mo.get("text") or "").strip()
+    text = (mo.get("text") or "").strip()
     text_l = text.lower()
 
     db = SessionLocal()
     try:
-        # ensure contact & open thread
+        # ensure contact & thread
         c = db.query(Contact).filter_by(phone=mo["from"]).first()
         if not c:
-            c = Contact(phone=mo["from"]); db.add(c)
+            c = Contact(phone=mo["from"])
+            db.add(c)
 
         t = db.query(Thread).filter_by(phone=mo["from"], status="open").first()
         if not t:
-            t = Thread(phone=mo["from"]); db.add(t); db.flush()
+            t = Thread(phone=mo["from"])
+            db.add(t)
+            db.flush()
 
         # store inbound message
         db.add(Message(thread_id=t.id, dir="in", body=text, status="delivered"))
 
-        # Hard STOP / DNC
-        if text_l in {"stop", "ne", "atsisakyti", "nedomina"}:
+        # Optional: configurable hard keywords (can be empty)
+        import os
+        raw = os.getenv("DNC_PHRASES", "")
+        dnc_phrases = {p.strip().lower() for p in raw.split(",") if p.strip()}
+        if dnc_phrases and text_l in dnc_phrases:
             c.dnc = True
             db.commit()
             await provider.send(mo["from"], "Sustabdyta. Dėkojame. (Atsisakėte pranešimų)", userref="dnc-confirm")
             return {"ok": True, "dnc": True}
-
-        # Build short conversation context for the LLM (last ~6 turns)
-        last_msgs = (
-            db.query(Message)
-              .join(Thread, Thread.id == Message.thread_id)
-              .filter(Thread.phone == mo["from"])
-              .order_by(Message.ts.asc())
-              .all()
-        )
-        ctx = []
-        for m in last_msgs[-6:]:
-            if m.dir == "in":
-                ctx.append({"role":"user","content": m.body})
-            else:
-                ctx.append({"role":"assistant","content": m.body})
-
-        # Ask LLM for the next message
-        reply = generate_reply_lt(ctx, text)
-
-        # Send (will be dry-run printing if DRY_RUN=1)
-        prov_id = await provider.send(mo["from"], reply, userref="llm-reply")
-
-        # store outbound
-        db.add(Message(thread_id=t.id, dir="out", body=reply, status="sent", provider_id=prov_id, userref="llm-reply"))
         db.commit()
-        return {"ok": True, "reply": reply}
     finally:
         db.close()
+
+    # Let the LLM decide
+    cls = classify_lt(text)  # {"intent": str, "confidence": float}
+    intent = (cls.get("intent") or "").lower()
+    if intent in {"stop", "not_interested", "do_not_contact", "unsubscribe"}:
+        db = SessionLocal()
+        try:
+            c = db.query(Contact).filter_by(phone=mo["from"]).first()
+            if c:
+                c.dnc = True
+                db.commit()
+        finally:
+            db.close()
+        await provider.send(mo["from"], "Supratau – daugiau netrukdysime. Gražios dienos!", userref="dnc-goodbye")
+        return {"ok": True, "intent": intent, "confidence": cls.get("confidence")}
+
+    # Otherwise, generate a natural reply via LLM and send it
+    from app.services.llm import generate_reply_lt
+    reply = generate_reply_lt({"msisdn": mo["from"]}, text)
+    await provider.send(mo["from"], reply, userref="llm-reply")
+    return {"ok": True, "intent": intent, "confidence": cls.get("confidence"), "reply": reply}
 
 
 @app.post("/webhooks/mo")
