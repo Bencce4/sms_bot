@@ -77,22 +77,64 @@ async def send(payload: dict):
     finally:
         db.close()
 
-@app.post("/webhooks/dlr")
-async def dlr(req: Request):
-    """Simulate a delivery report (you can POST JSON to this locally)."""
+from app.services.llm import classify_lt, generate_reply_lt
+
+@app.post("/webhooks/mo")
+async def mo(req: Request):
     payload = await req.json()
-    data = provider.parse_dlr(payload, req.headers)
+    mo = provider.parse_mo(payload, req.headers)
+    text = (mo.get("text") or "").trim() if hasattr(str, "trim") else (mo.get("text") or "").strip()
+    text_l = text.lower()
+
     db = SessionLocal()
     try:
-        m = db.query(Message).filter_by(provider_id=data["provider_id"]).first()
-        if not m:
-            # if we’ve never stored an outbound with this id (race), just noop
-            return {"ok": True}
-        m.status = data["status"].lower()
+        # ensure contact & open thread
+        c = db.query(Contact).filter_by(phone=mo["from"]).first()
+        if not c:
+            c = Contact(phone=mo["from"]); db.add(c)
+
+        t = db.query(Thread).filter_by(phone=mo["from"], status="open").first()
+        if not t:
+            t = Thread(phone=mo["from"]); db.add(t); db.flush()
+
+        # store inbound message
+        db.add(Message(thread_id=t.id, dir="in", body=text, status="delivered"))
+
+        # Hard STOP / DNC
+        if text_l in {"stop", "ne", "atsisakyti", "nedomina"}:
+            c.dnc = True
+            db.commit()
+            await provider.send(mo["from"], "Sustabdyta. Dėkojame. (Atsisakėte pranešimų)", userref="dnc-confirm")
+            return {"ok": True, "dnc": True}
+
+        # Build short conversation context for the LLM (last ~6 turns)
+        last_msgs = (
+            db.query(Message)
+              .join(Thread, Thread.id == Message.thread_id)
+              .filter(Thread.phone == mo["from"])
+              .order_by(Message.ts.asc())
+              .all()
+        )
+        ctx = []
+        for m in last_msgs[-6:]:
+            if m.dir == "in":
+                ctx.append({"role":"user","content": m.body})
+            else:
+                ctx.append({"role":"assistant","content": m.body})
+
+        # Ask LLM for the next message
+        reply = generate_reply_lt(ctx, text)
+
+        # Send (will be dry-run printing if DRY_RUN=1)
+        prov_id = await provider.send(mo["from"], reply, userref="llm-reply")
+
+        # store outbound
+        db.add(Message(thread_id=t.id, dir="out", body=reply, status="sent", provider_id=prov_id, userref="llm-reply"))
         db.commit()
+        return {"ok": True, "reply": reply}
     finally:
         db.close()
-    return {"ok": True}
+
 
 @app.post("/webhooks/mo")
 async def mo(req: Request):
