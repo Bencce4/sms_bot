@@ -16,6 +16,10 @@ PER_PERSON_MIN_SECONDS = int(os.getenv("PER_PERSON_MIN_SECONDS", "90"))
 from app.providers.base import SmsProvider
 provider = SmsProvider(dry_run=DRY_RUN)
 
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
+
 def within_business_hours() -> bool:
     if os.getenv("SKIP_BUSINESS_HOURS") == "1":
         return True
