@@ -1,6 +1,6 @@
 # app/services/llm.py
 import os, json, re, hashlib
-from typing import List, Dict
+from typing import List, Dict, Optional
 from sqlalchemy import desc
 from openai import OpenAI
 
@@ -29,19 +29,19 @@ Primary goal
 How to respond (must follow)
 1) LISTEN FIRST: answer their message with one short STATEMENT (≤80 chars, NEVER a question).
    • If they ask “what do you offer?” in any wording, say this **once per thread**: “{VALUE_LINE}”
-   • If they sound hesitant (e.g., “gal ir domintu”, “nežinau”, unsure), give a brief reassurance and include that same value line **once per thread**, then proceed.
-2) Then ask exactly ONE next missing qualifier in this order:
+   • If they sound hesitant (e.g., “gal ir domintų”, “nežinau”, unsure), give a brief reassurance and the same value line **once per thread**, then ask: “Ką manote?” (do not advance to qualifiers yet).
+2) Then, once interest is clear, ask exactly ONE next missing qualifier in this order:
    • City/region → ask: “Kur dirbate dabar (miestas/regionas)?”
    • Specialty/trade → ask: “Kokia jūsų specialybė ar sritis?”
-   • Years of experience → ask: “Kiek metų patirties turite?”
+   • Years of experience → prefer: “Kiek metų patirties turite kaip <specialty>?” else “Kiek metų patirties turite?”
    • Availability → ask: “Nuo kada galėtumėte pradėti arba koks grafikas tinka?”
 3) ONE SMS total. ≤160 chars. Natural, friendly, encouraging. No bureaucratic words.
-4) Never repeat the same sentence/idea that’s already been sent in this thread (especially do **not** repeat the offer line).
+4) Never repeat the same sentence/idea already sent in this thread (especially do **not** repeat the offer line).
 5) Do not assume they are job-hunting; ask where they **work now** (not “where you are looking”).
 6) Don’t invent pay/clients/locations. If asked: say details are shared later by phone, then continue qualifying.
 7) Never request sensitive data (ID, card, passwords, exact address, emails, codes). No legal advice.
 8) Language: mirror the user’s latest language (LT/RU/EN/UA). Else default LT.
-9) If asked “ar jūs robotas?” or similar, reply as a **human teammate** (do not disclose being a bot) and then ask about interest next turn.
+9) If asked “ar jūs robotas?” or similar, reply as a human teammate (do not disclose being a bot): “Ne. Ar domintų dirbti per Valandinį?” Then continue on next turn if they say yes.
 10) When all four items are collected, end with: “{CLOSE_TX}” and do not ask anything else.
 
 Output: return ONLY the SMS text. No JSON/markdown/explanations.
@@ -65,13 +65,11 @@ def _thread_history(phone: str, limit: int = 14) -> List[Dict[str, str]]:
         t = db.query(Thread).filter_by(phone=phone, status="open").first()
         if not t:
             return []
-        msgs = (
-            db.query(Message)
-              .filter(Message.thread_id == t.id)
-              .order_by(desc(Message.ts))
-              .limit(limit)
-              .all()
-        )
+        msgs = (db.query(Message)
+                  .filter(Message.thread_id == t.id)
+                  .order_by(desc(Message.ts))
+                  .limit(limit)
+                  .all())
         out = []
         for m in reversed(msgs):
             role = "assistant" if m.dir == "out" else "user"
@@ -107,6 +105,31 @@ def _strip_repeated_value_line(msg: str, history: List[Dict[str,str]]) -> str:
         return " ".join(parts).strip()
     return msg
 
+# light “memory”: pull specialty from the last user reply after we asked for it
+_SPECIALTY_Q_PAT = re.compile(r"koki(a|ą)\s+jūsų\s+specialybė|sritis\??", re.I)
+def _last_specialty(history: List[Dict[str,str]]) -> Optional[str]:
+    for a, b in zip(history[::-1], history[-2::-1]):  # iterate backwards in pairs
+        if a["role"] == "user" and b["role"] == "assistant":
+            if _SPECIALTY_Q_PAT.search(b["content"] or "") and (a["content"] or "").strip():
+                # take concise specialty phrase (first 4 words max)
+                raw = a["content"].strip()
+                words = raw.split()
+                return " ".join(words[:4])
+    return None
+
+# sparing micro-acks (variety)
+_ACKS = ["Gerai!", "Šaunu!", "Super!", "Puiku!"]
+def _ack(history: List[Dict[str,str]]) -> str:
+    # use at most ~1/3 of the time based on assistant-turn count
+    n = sum(1 for m in history if m["role"] == "assistant")
+    return _ACKS[n % len(_ACKS)] if n % 3 == 1 else ""
+
+# hesitation detector (semantic-ish)
+_HESIT_PAT = re.compile(r"\b(gal|nezinau|nežinau|maybe|not\s+sure|pamastysiu|pamatysiu)\b", re.I)
+
+def _is_hesitation(text: str) -> bool:
+    return bool(_HESIT_PAT.search(text or ""))
+
 def _call(messages):
     return client.chat.completions.create(
         model=MODEL, messages=messages, temperature=0.2
@@ -134,10 +157,18 @@ def generate_reply_lt(ctx: dict, text: str) -> str:
     if _assistant_has(history, CLOSE_TX.lower()):
         return ""  # no further messages
 
-    # Special-case: “are you a robot?” → concise human reply + interest check
-    if re.search(r"\b(robot|bot|dirbtin|ai|žmogus\?)\b", t_raw, re.I):
-        # Be brief, human, and move the convo forward
+    # If user asks if robot → crisp human answer + interest check
+    if re.search(r"\b(robot|bot|dirbtin|ai)\b", t_raw, re.I):
         return _final_sms("Ne. Ar domintų dirbti per Valandinį?")
+
+    # Hesitation → nudge + value line + “Ką manote?” (don’t advance yet)
+    if _is_hesitation(t_raw):
+        already_said = _assistant_has(history, VALUE_LINE.lower())
+        value_part = "" if already_said else VALUE_LINE
+        ack = _ack(history)
+        parts = [p for p in [ack, "Suprantu.", value_part, "Ką manote?"] if p]
+        msg = " ".join(parts).strip()
+        return _final_sms(msg)
 
     # Normal semantic flow via the model
     r = _call(_build_messages(ctx, text))
@@ -145,6 +176,22 @@ def generate_reply_lt(ctx: dict, text: str) -> str:
 
     # Never repeat the offer value line
     reply = _strip_repeated_value_line(reply, history)
+
+    # **Personalize** exp question with specialty if present in memory
+    spec = _last_specialty(history + [{"role": "user", "content": t_raw}])
+    if spec:
+        # replace generic exp question with specialized one
+        reply = re.sub(
+            r"\bKiek\s+metų\s+patirties\s+turite\??",
+            f"Kiek metų patirties turite kaip {spec}?",
+            reply
+        )
+
+    # Light ack injection (sparingly) if reply is a bare question
+    if reply.endswith("?"):
+        ack = _ack(history)
+        if ack:
+            reply = f"{ack} {reply}"
 
     # Final polish and length guard
     reply = _polish(reply).strip()
