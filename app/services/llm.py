@@ -277,17 +277,21 @@ def _call(messages):
 
 # ==== Main generator ====
 def generate_reply_lt(ctx: dict, text: str) -> str:
-
-    def generate_reply_lt(ctx: dict, text: str) -> str:
-        # --- debug triggers (accept '!prompt', '\!prompt', '##prompt##'; and '!trace ...') ---
-        t_raw = (text or "").strip()
-        t = t_raw.lstrip("\\").lower()  # so '\!prompt' also works
+    # --- debug triggers (must be FIRST lines in the function) ---
+    t_raw = (text or "").strip()
+    # accept '\!prompt' as well as '!prompt'
+    t = t_raw.lstrip("\\").lower()
 
     if t in {"!prompt", "!pf", "##prompt##"}:
-        return (f"{PROMPT_SHA} {os.getenv('LLM_REPLY_MODEL', os.getenv('LLM_MODEL','gpt-4o-mini'))}")[:160]
+        model = os.getenv("LLM_REPLY_MODEL", os.getenv("LLM_MODEL", "gpt-4o-mini"))
+        return (f"{PROMPT_SHA} {model}")[:160]
 
     if t.startswith("!trace ") or t.startswith("\\!trace "):
-        probe = t_raw.split(" ", 1)[1] if " " in t_raw else ""
+        # keep the original probe (don’t lowercase)
+        try:
+            probe = t_raw.split(" ", 1)[1]
+        except Exception:
+            probe = ""
         hits = []
         try:
             if _user_asked_offer(probe):  hits.append("offer")
@@ -299,6 +303,7 @@ def generate_reply_lt(ctx: dict, text: str) -> str:
             pass
         return ("TRACE:" + (",".join(hits) if hits else "none"))[:160]
 
+    # --- continue with your normal logic AFTER this ---
     history = _thread_history((ctx or {}).get("msisdn",""), limit=12)
     prev_sents = _assistant_sentences(history)
     user_text = text or ""
