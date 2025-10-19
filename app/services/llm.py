@@ -11,12 +11,12 @@ from app.storage.models import Thread, Message
 MODEL = os.getenv("LLM_REPLY_MODEL", os.getenv("LLM_MODEL", "gpt-4o-mini"))
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# ==== Constants (single source of truth) ====
+# ==== Constants ====
 VALUE_LINE = "Siūlome lanksčius grafikus, greitą pradžią ir paprastą procesą įsidarbinant."
 CLOSE_TX   = "Perduosiu kolegai – paskambins dėl detalių."
 
-# ==== System prompt (semantic-first; no routers) ====
-SYSTEM_PROMPT = f"""You are a short, *human-sounding* SMS recruiter for Valandinis (valandinis.lt).
+# ==== System prompt (semantic-first) ====
+SYSTEM_PROMPT = f"""You are a short, human-sounding SMS recruiter for Valandinis (valandinis.lt).
 
 About Valandinis (do not invent specifics)
 – Flexible hourly/shift work in construction & related trades across Lithuania
@@ -29,6 +29,7 @@ Primary goal
 How to respond (must follow)
 1) LISTEN FIRST: answer their message with one short STATEMENT (≤80 chars, NEVER a question).
    • If they ask “what do you offer?” in any wording, say this **once per thread**: “{VALUE_LINE}”
+   • If they sound hesitant (e.g., “gal ir domintu”, “nežinau”, unsure), give a brief reassurance and include that same value line **once per thread**, then proceed.
 2) Then ask exactly ONE next missing qualifier in this order:
    • City/region → ask: “Kur dirbate dabar (miestas/regionas)?”
    • Specialty/trade → ask: “Kokia jūsų specialybė ar sritis?”
@@ -40,7 +41,7 @@ How to respond (must follow)
 6) Don’t invent pay/clients/locations. If asked: say details are shared later by phone, then continue qualifying.
 7) Never request sensitive data (ID, card, passwords, exact address, emails, codes). No legal advice.
 8) Language: mirror the user’s latest language (LT/RU/EN/UA). Else default LT.
-9) If asked “ar jūs robotas?” or similar, reply as a **human teammate** (don’t disclose being a bot).
+9) If asked “ar jūs robotas?” or similar, reply as a **human teammate** (do not disclose being a bot) and then ask about interest next turn.
 10) When all four items are collected, end with: “{CLOSE_TX}” and do not ask anything else.
 
 Output: return ONLY the SMS text. No JSON/markdown/explanations.
@@ -86,9 +87,7 @@ def _final_sms(s: str) -> str:
 
 def _polish(text: str) -> str:
     t = (text or "").strip()
-    # tone/wording cleanups (no bureaucratic phrasing)
     t = re.sub(r"\bKą\s+dirbate\??", "Kokia jūsų specialybė ar sritis?", t, flags=re.I)
-    # prefer “dirbate”
     t = re.sub(r"\bdirbat(e)?\b", "dirbate", t, flags=re.I)
     return t.strip()
 
@@ -103,7 +102,6 @@ def _strip_repeated_value_line(msg: str, history: List[Dict[str,str]]) -> str:
     if not msg:
         return msg
     if _assistant_has(history, VALUE_LINE.lower()):
-        # remove the offer sentence if it appears again
         parts = [s.strip() for s in re.split(r'(?<=[\.\!\?])\s+', msg) if s.strip()]
         parts = [s for s in parts if VALUE_LINE.lower() not in s.lower()]
         return " ".join(parts).strip()
@@ -132,11 +130,16 @@ def generate_reply_lt(ctx: dict, text: str) -> str:
 
     history = _thread_history((ctx or {}).get("msisdn",""), limit=14)
 
-    # HARD STOP: if we already handed off, never reply again
+    # HARD STOP after handoff
     if _assistant_has(history, CLOSE_TX.lower()):
-        return ""  # your API treats empty as “no outbound SMS”
+        return ""  # no further messages
 
-    # Let the model semantically answer + ask exactly one qualifier
+    # Special-case: “are you a robot?” → concise human reply + interest check
+    if re.search(r"\b(robot|bot|dirbtin|ai|žmogus\?)\b", t_raw, re.I):
+        # Be brief, human, and move the convo forward
+        return _final_sms("Ne. Ar domintų dirbti per Valandinį?")
+
+    # Normal semantic flow via the model
     r = _call(_build_messages(ctx, text))
     reply = (r.choices[0].message.content or "").strip()
 
@@ -145,15 +148,11 @@ def generate_reply_lt(ctx: dict, text: str) -> str:
 
     # Final polish and length guard
     reply = _polish(reply).strip()
-
-    # If the model accidentally outputs only the offer line again (after stripping), skip sending
     if not reply:
         return ""
-
-    # If this is already the closing message, next inbound will be suppressed by the guard above
     return _final_sms(reply)
 
-# ==== Classifier (unchanged API; semantic via model) ====
+# ==== Classifier (API-compat; semantic via model) ====
 def classify_lt(text: str) -> dict:
     sys = (
         "Klasifikuok lietuvišką SMS į: 'questions', 'not_interested', arba 'other'. "
