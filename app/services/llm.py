@@ -1,4 +1,4 @@
-import os, json, re, unicodedata
+import os, json, re, unicodedata, hashlib
 from typing import List, Dict
 from difflib import SequenceMatcher
 from sqlalchemy import desc
@@ -15,7 +15,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # ==== Fewshots (compat; unused by default) ====
 FEWSHOTS: List[Dict[str, str]] = []
 
-# ==== System prompt (complete rules + warmer tone; forces statement-first) ====
+# ==== System prompt (rules + warmer tone; statement-first to avoid Q+Q) ====
 SYSTEM_PROMPT = """You are a short, upbeat SMS recruiting assistant for Valandinis (valandinis.lt).
 
 About Valandinis (do not invent specifics)
@@ -34,7 +34,7 @@ Core behavior (must follow)
    then ask exactly ONE qualifier.
 2) ONE question per SMS. Max 160 chars. Friendly, natural, encouraging. No bureaucratic phrasing.
    Use light micro-acknowledgements like “Puiku!”, “Super!”, “Skamba gerai!” sparingly.
-3) Use the value line (“Lankstūs grafikai, greitas startas, paprasta eiga.”) at most ONCE per thread,
+3) Use the value line (“Siūlome lanksčius grafikus, greitą pradžią ir paprastą procesą įsidarbinant.”) at most ONCE per thread,
    and only if they ask what you offer or hesitate.
 4) Never repeat the same sentence/idea already sent in this thread.
 5) Do not invent pay, clients, or locations. If asked: say details are shared later by phone, then continue qualifying.
@@ -51,12 +51,9 @@ Output
 """
 
 # ==== Prompt fingerprint & debug ====
-import hashlib
 PROMPT_SHA = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()[:12]
-
 def prompt_info() -> str:
     return f"PROMPT_SHA={PROMPT_SHA} MODEL={os.getenv('LLM_REPLY_MODEL', os.getenv('LLM_MODEL','gpt-4o-mini'))}"
-
 try:
     print(f"[llm] {prompt_info()}", flush=True)
 except Exception:
@@ -156,10 +153,8 @@ _RX_SPEC   = re.compile(r'\b(specialyb|srit|elektrik|santechn|mūrin|murin|beton
 _RX_EXP    = re.compile(r'\b(\d+)\s*(m(?:et[au]|\.)?|metai|yr|years?)\b', re.I)
 _RX_AVAIL  = re.compile(r'\b(pradėt|pradėsiu|pradesiu|start|nuo|grafik|rytoj|šiand|siand)\w*', re.I)
 
-# ==== Intent detectors (single definitions; broad & robust) ====
-_OFFER_SENT = re.compile(r'(lankst\w* grafik|greit\w* start|paprast\w* eig)', re.I)
-
-# BROAD OFFER PATTERN (covers “o ka jus siulote?”, “ką pasiūlyti”, EN variants)
+# ==== Intent detectors (broad/robust) ====
+_OFFER_SENT = re.compile(r'(lankst\w* grafik|greit\w* prad|greit\w* start|paprast\w* proces|paprast\w* eig)', re.I)
 _OFFER_PAT  = re.compile(
     r'(\b(k(a|ą)|ko)\s+(galit(e)?\s+)?(siu|siul|pasiul)\w*\b)|'
     r'(\b(what|tell)\b.*\boffer\b)|\boffer\?\b',
@@ -244,29 +239,29 @@ def _next_missing_question(history):
         return _pick_variant(_Q_AVAIL, history)
     return "Perduosiu kolegai – paskambins dėl detalių."
 
-# ==== Value line control ====
+# ==== Value line (your exact sentence), show once per thread ====
 def _value_sentence_once(history) -> str:
     sent_before = " ".join((m["content"] or "").lower() for m in history if m["role"]=="assistant")
-    if any(k in sent_before for k in ["lankst", "greit", "paprast"]):
+    if any(k in sent_before for k in ["lanks", "greit", "paprast"]):
         return ""
-    return "Lankstūs grafikai, greitas startas, paprasta eiga."
+    return "Siūlome lanksčius grafikus, greitą pradžią ir paprastą procesą įsidarbinant."
 
-# ==== Compose: friendly answer-first + one qualifier ====
+# ==== Compose: statement-first + exactly one qualifier ====
+def _as_statement(s: str) -> str:
+    s = (s or "").strip()
+    if "?" in s:
+        # never send a question as the 'answer'
+        return "Gerai, padėsiu suderinti."
+    return s
+
 def _answer_then_ask(answer_line: str, history) -> str:
     ack = _ack(history)
     q = _polite(_next_missing_question(history))
     if q.startswith("Perduosiu kolegai"):
         msg = f"{answer_line} {q}".strip() if answer_line else q
         return _final_sms(msg)
-    parts = [p for p in [answer_line, ack, q] if p]
+    parts = [p for p in [_as_statement(answer_line), ack, q] if p]
     return _final_sms(" ".join(parts))
-
-def _as_statement(s: str) -> str:
-    """Ensure the 'answer' is a statement (never a question)."""
-    s = (s or "").strip()
-    if "?" in s:
-        return "Trumpai: turime įvairių darbų su pamainomis."
-    return s
 
 # ==== OpenAI wiring ====
 def _build_messages(ctx: dict, text: str) -> List[Dict[str,str]]:
@@ -285,7 +280,7 @@ def _call(messages):
 
 # ==== Main generator ====
 def generate_reply_lt(ctx: dict, text: str) -> str:
-    # --- debug triggers (must be FIRST lines) ---
+    # --- debug triggers (FIRST) ---
     t_raw = (text or "").strip()
     t = t_raw.lstrip("\\").lower()
     if t in {"!prompt", "!pf", "##prompt##"}:
@@ -306,7 +301,7 @@ def generate_reply_lt(ctx: dict, text: str) -> str:
         except Exception:
             pass
         return ("TRACE:" + (",".join(hits) if hits else "none"))[:160]
-    # --- normal logic ---
+
     history = _thread_history((ctx or {}).get("msisdn",""), limit=12)
     prev_sents = _assistant_sentences(history)
     user_text = text or ""
@@ -315,53 +310,37 @@ def generate_reply_lt(ctx: dict, text: str) -> str:
     if _user_insult(user_text):
         return _final_sms("Supratau. Jei prireiks darbo galimybių – parašykite. Gražios dienos!")
 
-    # Deterministic semantic answers first (always statements), then one qualifier
+    # Deterministic branches (statement + one qualifier)
     if _user_asked_offer(user_text):
-        ans = _value_sentence_once(history) or "Turime įvairių darbų statybose su pamainomis."
-        return _answer_then_ask(_as_statement(ans), history)
+        ans = _value_sentence_once(history) or "Siūlome lanksčius grafikus, greitą pradžią ir paprastą procesą įsidarbinant."
+        return _answer_then_ask(ans, history)
 
     if _user_asked_pay(user_text):
-        ans = "Atlygis priklauso nuo vietos ir darbo – suderiname telefonu."
-        return _answer_then_ask(_as_statement(ans), history)
+        return _answer_then_ask("Atlygis priklauso nuo vietos ir darbo – suderiname telefonu.", history)
 
     if _user_asked_remote(user_text):
-        ans = "Darbai daugiausia vietoje; nuotolinis retas."
-        return _answer_then_ask(_as_statement(ans), history)
+        return _answer_then_ask("Darbai dažniausiai vietoje; nuotolinis retas.", history)
 
     if _user_asked_human(user_text):
-        ans = "Čia Valandinis SMS asistentas – padėsiu su pagrindiniais klausimais."
-        return _answer_then_ask(_as_statement(ans), history)
+        return _answer_then_ask("Čia Valandinis SMS asistentas – padėsiu su pagrindiniais klausimais.", history)
 
-    # Generic question → answer-first via model, then one qualifier (convert to statement)
+    # If user asked any other question → answer (statement) + one qualifier
     if _user_any_question(user_text):
         r = _call(_build_messages(ctx, text))
         reply = _polite((r.choices[0].message.content or "").strip())
         sents = [s for s in _split_sents(reply) if not _mentions_offer(s)]
         kept = [s for s in sents if all(_sim(s, ps) < 0.76 for ps in prev_sents)]
-        answer_line = kept[0] if kept else "Trumpai: turime įvairių darbų su pamainomis."
-        answer_line = _as_statement(answer_line)
-        if _mentions_offer(answer_line) and not _user_asked_offer(user_text):
-            answer_line = "Trumpai: turime įvairių darbų su pamainomis."
+        answer_line = kept[0] if kept else "Gerai, padėsiu suderinti."
         return _answer_then_ask(answer_line, history)
 
-    # No explicit question → normal flow with anti-repeat and friendly tone
+    # No explicit question → ALWAYS move forward: statement ack + ONE qualifier
     r = _call(_build_messages(ctx, text))
     reply = _polite((r.choices[0].message.content or "").strip())
     sents = [s for s in _split_sents(reply) if not _mentions_offer(s)]
     kept = [s for s in sents if all(_sim(s, ps) < 0.76 for ps in prev_sents)]
-
-    if not kept:
-        ack = _ack(history)
-        q = _polite(_next_missing_question(history))
-        msg = " ".join([p for p in [ack, q] if p])
-        return _final_sms(msg)
-
-    out = kept[0]
-    if "?" in out:
-        ack = _ack(history)
-        if ack:
-            out = f"{ack} {out}"
-    return _final_sms(out)
+    answer_line = kept[0] if kept else ""
+    # Always append a qualifier unless already closing
+    return _answer_then_ask(answer_line, history)
 
 # ==== Classifier (kept compatible; simple fallbacks) ====
 def classify_lt(text: str) -> dict:
