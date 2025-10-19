@@ -15,7 +15,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # ==== Fewshots (compat; unused by default) ====
 FEWSHOTS: List[Dict[str, str]] = []
 
-# ==== System prompt (complete rules + warmer tone) ====
+# ==== System prompt (complete rules + warmer tone; forces statement-first) ====
 SYSTEM_PROMPT = """You are a short, upbeat SMS recruiting assistant for Valandinis (valandinis.lt).
 
 About Valandinis (do not invent specifics)
@@ -30,7 +30,8 @@ Primary goal
 – If clearly not interested, acknowledge once and stop. A human will call later if interested.
 
 Core behavior (must follow)
-1) LISTEN FIRST: briefly answer the user’s message FIRST (≤80 chars), then ask exactly ONE qualifier.
+1) LISTEN FIRST: briefly answer the user’s message FIRST in one short STATEMENT (≤80 chars, never a question),
+   then ask exactly ONE qualifier.
 2) ONE question per SMS. Max 160 chars. Friendly, natural, encouraging. No bureaucratic phrasing.
    Use light micro-acknowledgements like “Puiku!”, “Super!”, “Skamba gerai!” sparingly.
 3) Use the value line (“Lankstūs grafikai, greitas startas, paprasta eiga.”) at most ONCE per thread,
@@ -49,19 +50,17 @@ Output
 – Return only the message text. No JSON/markdown/explanations.
 """
 
-
+# ==== Prompt fingerprint & debug ====
 import hashlib
 PROMPT_SHA = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()[:12]
 
 def prompt_info() -> str:
     return f"PROMPT_SHA={PROMPT_SHA} MODEL={os.getenv('LLM_REPLY_MODEL', os.getenv('LLM_MODEL','gpt-4o-mini'))}"
 
-# Optional: log once on import so you also see it in server logs
 try:
     print(f"[llm] {prompt_info()}", flush=True)
 except Exception:
     pass
-
 
 # ==== History (DB) ====
 def _thread_history(phone: str, limit: int = 12) -> List[Dict[str,str]]:
@@ -118,9 +117,7 @@ def _polite(text: str) -> str:
 # ==== Style: friendly micro-acks and rotating question variants ====
 _ACKS = ["Puiku!", "Super!", "Skamba gerai!", "Gerai supratau."]
 def _ack(history: List[Dict[str,str]]) -> str:
-    # deterministic rotation based on how many assistant turns we already sent
     n = sum(1 for m in history if m["role"]=="assistant")
-    # use ack only sometimes to avoid spammy tone
     return _ACKS[n % len(_ACKS)] if n % 2 == 1 else ""
 
 _Q_CITY = [
@@ -148,7 +145,7 @@ def _pick_variant(options: List[str], history: List[Dict[str,str]]) -> str:
     n = sum(1 for m in history if m["role"]=="assistant")
     return options[n % len(options)]
 
-# ==== Regexes (answers & slot detection) ====
+# ==== Regexes (slot detection) ====
 _RX_CITY   = re.compile(r'\b(miest|region)\w*', re.I)
 _RX_CITY_ANS = re.compile(
     r'(vilni\w*|kaun\w*|klaip\w*|šiauli\w*|siauli\w*|panevėž\w*|panevez\w*|alyt\w*|marijamp\w*|kedain\w*|uten\w*|taurag\w*|'
@@ -159,13 +156,19 @@ _RX_SPEC   = re.compile(r'\b(specialyb|srit|elektrik|santechn|mūrin|murin|beton
 _RX_EXP    = re.compile(r'\b(\d+)\s*(m(?:et[au]|\.)?|metai|yr|years?)\b', re.I)
 _RX_AVAIL  = re.compile(r'\b(pradėt|pradėsiu|pradesiu|start|nuo|grafik|rytoj|šiand|siand)\w*', re.I)
 
-# detect common intents (offer/pay/remote/human/abuse)
-_OFFER_PAT  = re.compile(r'\b(ka|ką)\s+(galite\s+)?(pasiu|siu|siul|pasiul)\w*|\bwhat.*offer|\boffer\b', re.I)
+# ==== Intent detectors (single definitions; broad & robust) ====
+_OFFER_SENT = re.compile(r'(lankst\w* grafik|greit\w* start|paprast\w* eig)', re.I)
+
+# BROAD OFFER PATTERN (covers “o ka jus siulote?”, “ką pasiūlyti”, EN variants)
+_OFFER_PAT  = re.compile(
+    r'(\b(k(a|ą)|ko)\s+(galit(e)?\s+)?(siu|siul|pasiul)\w*\b)|'
+    r'(\b(what|tell)\b.*\boffer\b)|\boffer\?\b',
+    re.I,
+)
 _PAY_PAT    = re.compile(r'\b(atlygin|alga|mok(a|at)|kiek\s*(mok|pay)|salary|eur|€/h|per\s*val)\b', re.I)
 _REMOTE_PAT = re.compile(r'\b(nuotol|remote)\b', re.I)
 _HUMAN_PAT  = re.compile(r'\b(robot|bot|žmog|zmog|human)\b', re.I)
 _INSULT_PAT = re.compile(r'\b(nx|nax|eik\s*nax|fuck|idiot|deb|loho)\w*', re.I)
-_OFFER_SENT = re.compile(r'(lankst\w* grafik|greit\w* start|paprast\w* eig)', re.I)
 
 def _mentions_offer(text: str) -> bool:
     return bool(_OFFER_SENT.search(text or ""))
@@ -186,8 +189,8 @@ def _user_insult(text: str) -> bool:
     return bool(_INSULT_PAT.search(_normalize(text)))
 
 def _user_any_question(text: str) -> bool:
-    t = text or ""
-    return "?" in t or _user_asked_offer(t) or _user_asked_pay(t) or _user_asked_remote(t) or _user_asked_human(t)
+    t = _normalize(text)
+    return ("?" in (text or "")) or _user_asked_offer(t) or _user_asked_pay(t) or _user_asked_remote(t) or _user_asked_human(t)
 
 # ==== Slot tracking (accept volunteered info) ====
 def _pairwise(history: List[Dict[str,str]]):
@@ -253,11 +256,17 @@ def _answer_then_ask(answer_line: str, history) -> str:
     ack = _ack(history)
     q = _polite(_next_missing_question(history))
     if q.startswith("Perduosiu kolegai"):
-        # already complete: keep it short and friendly
         msg = f"{answer_line} {q}".strip() if answer_line else q
         return _final_sms(msg)
     parts = [p for p in [answer_line, ack, q] if p]
     return _final_sms(" ".join(parts))
+
+def _as_statement(s: str) -> str:
+    """Ensure the 'answer' is a statement (never a question)."""
+    s = (s or "").strip()
+    if "?" in s:
+        return "Trumpai: turime įvairių darbų su pamainomis."
+    return s
 
 # ==== OpenAI wiring ====
 def _build_messages(ctx: dict, text: str) -> List[Dict[str,str]]:
@@ -272,22 +281,17 @@ def _build_messages(ctx: dict, text: str) -> List[Dict[str,str]]:
     return msgs
 
 def _call(messages):
-    # low temp for consistency; we enforce tone/length post-hoc
     return client.chat.completions.create(model=MODEL, messages=messages, temperature=0.2)
 
 # ==== Main generator ====
 def generate_reply_lt(ctx: dict, text: str) -> str:
-    # --- debug triggers (must be FIRST lines in the function) ---
+    # --- debug triggers (must be FIRST lines) ---
     t_raw = (text or "").strip()
-    # accept '\!prompt' as well as '!prompt'
     t = t_raw.lstrip("\\").lower()
-
     if t in {"!prompt", "!pf", "##prompt##"}:
         model = os.getenv("LLM_REPLY_MODEL", os.getenv("LLM_MODEL", "gpt-4o-mini"))
         return (f"{PROMPT_SHA} {model}")[:160]
-
     if t.startswith("!trace ") or t.startswith("\\!trace "):
-        # keep the original probe (don’t lowercase)
         try:
             probe = t_raw.split(" ", 1)[1]
         except Exception:
@@ -302,8 +306,7 @@ def generate_reply_lt(ctx: dict, text: str) -> str:
         except Exception:
             pass
         return ("TRACE:" + (",".join(hits) if hits else "none"))[:160]
-
-    # --- continue with your normal logic AFTER this ---
+    # --- normal logic ---
     history = _thread_history((ctx or {}).get("msisdn",""), limit=12)
     prev_sents = _assistant_sentences(history)
     user_text = text or ""
@@ -312,31 +315,31 @@ def generate_reply_lt(ctx: dict, text: str) -> str:
     if _user_insult(user_text):
         return _final_sms("Supratau. Jei prireiks darbo galimybių – parašykite. Gražios dienos!")
 
-    # Deterministic semantic answers first (friendlier, concise), then one qualifier
+    # Deterministic semantic answers first (always statements), then one qualifier
     if _user_asked_offer(user_text):
         ans = _value_sentence_once(history) or "Turime įvairių darbų statybose su pamainomis."
-        return _answer_then_ask(ans, history)
+        return _answer_then_ask(_as_statement(ans), history)
 
     if _user_asked_pay(user_text):
         ans = "Atlygis priklauso nuo vietos ir darbo – suderiname telefonu."
-        return _answer_then_ask(ans, history)
+        return _answer_then_ask(_as_statement(ans), history)
 
     if _user_asked_remote(user_text):
         ans = "Darbai daugiausia vietoje; nuotolinis retas."
-        return _answer_then_ask(ans, history)
+        return _answer_then_ask(_as_statement(ans), history)
 
     if _user_asked_human(user_text):
         ans = "Čia Valandinis SMS asistentas – padėsiu su pagrindiniais klausimais."
-        return _answer_then_ask(ans, history)
+        return _answer_then_ask(_as_statement(ans), history)
 
-    # Generic question → answer-first via model, then one qualifier
+    # Generic question → answer-first via model, then one qualifier (convert to statement)
     if _user_any_question(user_text):
         r = _call(_build_messages(ctx, text))
         reply = _polite((r.choices[0].message.content or "").strip())
-        # remove unsolicited offer lines and repeats
         sents = [s for s in _split_sents(reply) if not _mentions_offer(s)]
         kept = [s for s in sents if all(_sim(s, ps) < 0.76 for ps in prev_sents)]
         answer_line = kept[0] if kept else "Trumpai: turime įvairių darbų su pamainomis."
+        answer_line = _as_statement(answer_line)
         if _mentions_offer(answer_line) and not _user_asked_offer(user_text):
             answer_line = "Trumpai: turime įvairių darbų su pamainomis."
         return _answer_then_ask(answer_line, history)
@@ -348,18 +351,16 @@ def generate_reply_lt(ctx: dict, text: str) -> str:
     kept = [s for s in sents if all(_sim(s, ps) < 0.76 for ps in prev_sents)]
 
     if not kept:
-        # fallback to next missing, with a light ack
         ack = _ack(history)
         q = _polite(_next_missing_question(history))
         msg = " ".join([p for p in [ack, q] if p])
         return _final_sms(msg)
 
-    # Enforce single-sentence/one-question SMS, but spice with ack if it's a question
     out = kept[0]
     if "?" in out:
         ack = _ack(history)
         if ack:
-            out = _final_sms(f"{ack} {out}")
+            out = f"{ack} {out}"
     return _final_sms(out)
 
 # ==== Classifier (kept compatible; simple fallbacks) ====
