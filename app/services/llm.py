@@ -54,7 +54,7 @@ import hashlib
 PROMPT_SHA = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()[:12]
 
 def prompt_info() -> str:
-    return f"PROMPT_SHA={PROMPT_SHA} MODEL={MODEL}"
+    return f"PROMPT_SHA={PROMPT_SHA} MODEL={os.getenv('LLM_REPLY_MODEL', os.getenv('LLM_MODEL','gpt-4o-mini'))}"
 
 # Optional: log once on import so you also see it in server logs
 try:
@@ -278,9 +278,26 @@ def _call(messages):
 # ==== Main generator ====
 def generate_reply_lt(ctx: dict, text: str) -> str:
 
-    t = (text or "").strip().lower()
+    def generate_reply_lt(ctx: dict, text: str) -> str:
+    # --- debug triggers (accept '!prompt', '\!prompt', '##prompt##'; and '!trace ...') ---
+    t_raw = (text or "").strip()
+    t = t_raw.lstrip("\\").lower()  # so '\!prompt' also works
+
     if t in {"!prompt", "!pf", "##prompt##"}:
-        return f"{PROMPT_SHA} {MODEL}"
+        return (f"{PROMPT_SHA} {os.getenv('LLM_REPLY_MODEL', os.getenv('LLM_MODEL','gpt-4o-mini'))}")[:160]
+
+    if t.startswith("!trace ") or t.startswith("\\!trace "):
+        probe = t_raw.split(" ", 1)[1] if " " in t_raw else ""
+        hits = []
+        try:
+            if _user_asked_offer(probe):  hits.append("offer")
+            if _user_asked_pay(probe):    hits.append("pay")
+            if _user_asked_remote(probe): hits.append("remote")
+            if _user_asked_human(probe):  hits.append("human")
+            if _user_any_question(probe): hits.append("any_q")
+        except Exception:
+            pass
+        return ("TRACE:" + (",".join(hits) if hits else "none"))[:160]
 
     history = _thread_history((ctx or {}).get("msisdn",""), limit=12)
     prev_sents = _assistant_sentences(history)
