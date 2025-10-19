@@ -15,7 +15,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # ==== Fewshots (compat; unused by default) ====
 FEWSHOTS: List[Dict[str, str]] = []
 
-# ==== System prompt (rules + warmer tone; statement-first to avoid Q+Q) ====
+# ==== System prompt ====
 SYSTEM_PROMPT = """You are a short, upbeat SMS recruiting assistant for Valandinis (valandinis.lt).
 
 About Valandinis (do not invent specifics)
@@ -33,7 +33,6 @@ Core behavior (must follow)
 1) LISTEN FIRST: briefly answer the user’s message FIRST in one short STATEMENT (≤80 chars, never a question),
    then ask exactly ONE qualifier.
 2) ONE question per SMS. Max 160 chars. Friendly, natural, encouraging. No bureaucratic phrasing.
-   Use light micro-acknowledgements like “Puiku!”, “Super!”, “Skamba gerai!” sparingly.
 3) Use the value line (“Siūlome lanksčius grafikus, greitą pradžią ir paprastą procesą įsidarbinant.”) at most ONCE per thread,
    and only if they ask what you offer or hesitate.
 4) Never repeat the same sentence/idea already sent in this thread.
@@ -111,12 +110,7 @@ def _polite(text: str) -> str:
     t = re.sub(r'\bKą\s+dirbate\??', 'Kokia jūsų specialybė ar sritis?', t, flags=re.I)
     return t.strip()
 
-# ==== Style: friendly micro-acks and rotating question variants ====
-_ACKS = ["Puiku!", "Super!", "Skamba gerai!", "Gerai supratau."]
-def _ack(history: List[Dict[str,str]]) -> str:
-    n = sum(1 for m in history if m["role"]=="assistant")
-    return _ACKS[n % len(_ACKS)] if n % 2 == 1 else ""
-
+# ==== Question variants (trimmed; no “maždaug”, no acks) ====
 _Q_CITY = [
     "Kuriame mieste ar regione dirbtumėte?",
     "Kur jums patogiausia dirbti (miestas/regionas)?",
@@ -128,9 +122,7 @@ _Q_SPEC = [
     "Kokia sritis jums artimiausia?",
 ]
 _Q_EXP = [
-    "Kiek metų patirties turite šioje srityje?",
-    "Kiek metų patirties maždaug?",
-    "Kokia jūsų patirtis (metais)?",
+    "Kiek metų patirties turite?",
 ]
 _Q_AVAIL = [
     "Nuo kada galėtumėte pradėti arba koks grafikas tinka?",
@@ -142,7 +134,7 @@ def _pick_variant(options: List[str], history: List[Dict[str,str]]) -> str:
     n = sum(1 for m in history if m["role"]=="assistant")
     return options[n % len(options)]
 
-# ==== Regexes (slot detection) ====
+# ==== Regexes (slot detection; FIXED for 'metus/metų/metu/m.') ====
 _RX_CITY   = re.compile(r'\b(miest|region)\w*', re.I)
 _RX_CITY_ANS = re.compile(
     r'(vilni\w*|kaun\w*|klaip\w*|šiauli\w*|siauli\w*|panevėž\w*|panevez\w*|alyt\w*|marijamp\w*|kedain\w*|uten\w*|taurag\w*|'
@@ -150,10 +142,10 @@ _RX_CITY_ANS = re.compile(
     re.I
 )
 _RX_SPEC   = re.compile(r'\b(specialyb|srit|elektrik|santechn|mūrin|murin|beton|pagalbin|mechanik)\w*', re.I)
-_RX_EXP    = re.compile(r'\b(\d+)\s*(m(?:et[au]|\.)?|metai|yr|years?)\b', re.I)
+_RX_EXP    = re.compile(r'\b(\d{1,2})\s*(m(?:et[au]|\.)?|metai|metus|metu|metų|yr|years?)\b', re.I)
 _RX_AVAIL  = re.compile(r'\b(pradėt|pradėsiu|pradesiu|start|nuo|grafik|rytoj|šiand|siand)\w*', re.I)
 
-# ==== Intent detectors (broad/robust) ====
+# ==== Intent detectors ====
 _OFFER_SENT = re.compile(r'(lankst\w* grafik|greit\w* prad|greit\w* start|paprast\w* proces|paprast\w* eig)', re.I)
 _OFFER_PAT  = re.compile(
     r'(\b(k(a|ą)|ko)\s+(galit(e)?\s+)?(siu|siul|pasiul)\w*\b)|'
@@ -246,21 +238,19 @@ def _value_sentence_once(history) -> str:
         return ""
     return "Siūlome lanksčius grafikus, greitą pradžią ir paprastą procesą įsidarbinant."
 
-# ==== Compose: statement-first + exactly one qualifier ====
+# ==== Compose: statement-first + exactly one qualifier (NO ACKS) ====
 def _as_statement(s: str) -> str:
     s = (s or "").strip()
     if "?" in s:
-        # never send a question as the 'answer'
         return "Gerai, padėsiu suderinti."
     return s
 
 def _answer_then_ask(answer_line: str, history) -> str:
-    ack = _ack(history)
     q = _polite(_next_missing_question(history))
     if q.startswith("Perduosiu kolegai"):
-        msg = f"{answer_line} {q}".strip() if answer_line else q
+        msg = f"{_as_statement(answer_line)} {q}".strip() if answer_line else q
         return _final_sms(msg)
-    parts = [p for p in [_as_statement(answer_line), ack, q] if p]
+    parts = [p for p in [_as_statement(answer_line), q] if p]
     return _final_sms(" ".join(parts))
 
 # ==== OpenAI wiring ====
@@ -333,13 +323,12 @@ def generate_reply_lt(ctx: dict, text: str) -> str:
         answer_line = kept[0] if kept else "Gerai, padėsiu suderinti."
         return _answer_then_ask(answer_line, history)
 
-    # No explicit question → ALWAYS move forward: statement ack + ONE qualifier
+    # No explicit question → ALWAYS move forward with exactly one qualifier
     r = _call(_build_messages(ctx, text))
     reply = _polite((r.choices[0].message.content or "").strip())
     sents = [s for s in _split_sents(reply) if not _mentions_offer(s)]
     kept = [s for s in sents if all(_sim(s, ps) < 0.76 for ps in prev_sents)]
     answer_line = kept[0] if kept else ""
-    # Always append a qualifier unless already closing
     return _answer_then_ask(answer_line, history)
 
 # ==== Classifier (kept compatible; simple fallbacks) ====
