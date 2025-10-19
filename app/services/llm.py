@@ -279,9 +279,9 @@ def _call(messages):
 def generate_reply_lt(ctx: dict, text: str) -> str:
 
     def generate_reply_lt(ctx: dict, text: str) -> str:
-    # --- debug triggers (accept '!prompt', '\!prompt', '##prompt##'; and '!trace ...') ---
-    t_raw = (text or "").strip()
-    t = t_raw.lstrip("\\").lower()  # so '\!prompt' also works
+        # --- debug triggers (accept '!prompt', '\!prompt', '##prompt##'; and '!trace ...') ---
+        t_raw = (text or "").strip()
+        t = t_raw.lstrip("\\").lower()  # so '\!prompt' also works
 
     if t in {"!prompt", "!pf", "##prompt##"}:
         return (f"{PROMPT_SHA} {os.getenv('LLM_REPLY_MODEL', os.getenv('LLM_MODEL','gpt-4o-mini'))}")[:160]
