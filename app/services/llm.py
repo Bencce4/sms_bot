@@ -1,5 +1,5 @@
 # app/services/llm.py
-import os, json, re, hashlib, unicodedata
+import os, json, re, hashlib
 from typing import List, Dict
 from sqlalchemy import desc
 from openai import OpenAI
@@ -11,8 +11,12 @@ from app.storage.models import Thread, Message
 MODEL = os.getenv("LLM_REPLY_MODEL", os.getenv("LLM_MODEL", "gpt-4o-mini"))
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# ==== System prompt (single source of truth) ====
-SYSTEM_PROMPT = """You are a short, human-sounding SMS recruiting assistant for Valandinis (valandinis.lt).
+# ==== Constants (single source of truth) ====
+VALUE_LINE = "Siūlome lanksčius grafikus, greitą pradžią ir paprastą procesą įsidarbinant."
+CLOSE_TX   = "Perduosiu kolegai – paskambins dėl detalių."
+
+# ==== System prompt (semantic-first; no routers) ====
+SYSTEM_PROMPT = f"""You are a short, *human-sounding* SMS recruiter for Valandinis (valandinis.lt).
 
 About Valandinis (do not invent specifics)
 – Flexible hourly/shift work in construction & related trades across Lithuania
@@ -23,17 +27,21 @@ Primary goal
 – Gauge interest and, if positive, collect only: (1) city/region, (2) specialty/trade, (3) years of experience, (4) availability.
 
 How to respond (must follow)
-1) LISTEN FIRST: answer the user’s message with one short STATEMENT (≤80 chars, NEVER a question).
-   • If they ask “what do you offer?” (any wording), say exactly once per thread:
-     “Siūlome lanksčius grafikus, greitą pradžią ir paprastą procesą įsidarbinant.”
-2) Then ask exactly ONE next missing qualifier (from the set above), in this order:
-   city/region → specialty/trade → years of experience → availability.
+1) LISTEN FIRST: answer their message with one short STATEMENT (≤80 chars, NEVER a question).
+   • If they ask “what do you offer?” in any wording, say this **once per thread**: “{VALUE_LINE}”
+2) Then ask exactly ONE next missing qualifier in this order:
+   • City/region → ask: “Kur dirbate dabar (miestas/regionas)?”
+   • Specialty/trade → ask: “Kokia jūsų specialybė ar sritis?”
+   • Years of experience → ask: “Kiek metų patirties turite?”
+   • Availability → ask: “Nuo kada galėtumėte pradėti arba koks grafikas tinka?”
 3) ONE SMS total. ≤160 chars. Natural, friendly, encouraging. No bureaucratic words.
-4) Never repeat the same sentence/idea previously sent in this thread.
-5) Safety: don’t invent pay/clients/locations; if asked, say details are shared later by phone and continue.
-   Never request sensitive data (ID, card, passwords, exact address, emails, codes). No legal advice.
-6) Language: mirror the user’s latest language (LT/RU/EN/UA). Else default LT.
-7) Close when all 4 items are collected: “Perduosiu kolegai – paskambins dėl detalių.”
+4) Never repeat the same sentence/idea that’s already been sent in this thread (especially do **not** repeat the offer line).
+5) Do not assume they are job-hunting; ask where they **work now** (not “where you are looking”).
+6) Don’t invent pay/clients/locations. If asked: say details are shared later by phone, then continue qualifying.
+7) Never request sensitive data (ID, card, passwords, exact address, emails, codes). No legal advice.
+8) Language: mirror the user’s latest language (LT/RU/EN/UA). Else default LT.
+9) If asked “ar jūs robotas?” or similar, reply as a **human teammate** (don’t disclose being a bot).
+10) When all four items are collected, end with: “{CLOSE_TX}” and do not ask anything else.
 
 Output: return ONLY the SMS text. No JSON/markdown/explanations.
 """
@@ -48,7 +56,7 @@ except Exception:
     pass
 
 # ==== DB history ====
-def _thread_history(phone: str, limit: int = 12) -> List[Dict[str, str]]:
+def _thread_history(phone: str, limit: int = 14) -> List[Dict[str, str]]:
     if not phone:
         return []
     db = SessionLocal()
@@ -71,51 +79,81 @@ def _thread_history(phone: str, limit: int = 12) -> List[Dict[str, str]]:
     finally:
         db.close()
 
-# ==== Utils ====
+# ==== Helpers ====
 def _final_sms(s: str) -> str:
     s = re.sub(r"\s+", " ", (s or "")).strip()
     return (s[:157].rstrip() + "…") if len(s) > 160 else s
 
 def _polish(text: str) -> str:
-    # small linguistic cleanups; no tone injection, no acks
-    t = text or ""
-    # normalize Lithuanian diacritics inconsistencies from model
-    t = re.sub(r"\bdirbat(e)?\b", "dirbate", t, flags=re.I)
-    # avoid bureaucratic “Ką dirbate?” → preferred phrasing
+    t = (text or "").strip()
+    # tone/wording cleanups (no bureaucratic phrasing)
     t = re.sub(r"\bKą\s+dirbate\??", "Kokia jūsų specialybė ar sritis?", t, flags=re.I)
+    # prefer “dirbate”
+    t = re.sub(r"\bdirbat(e)?\b", "dirbate", t, flags=re.I)
     return t.strip()
 
-# ==== OpenAI call ====
+def _assistant_has(history: List[Dict[str,str]], needle: str) -> bool:
+    n = (needle or "").lower()
+    for m in history:
+        if m["role"] == "assistant" and n in (m["content"] or "").lower():
+            return True
+    return False
+
+def _strip_repeated_value_line(msg: str, history: List[Dict[str,str]]) -> str:
+    if not msg:
+        return msg
+    if _assistant_has(history, VALUE_LINE.lower()):
+        # remove the offer sentence if it appears again
+        parts = [s.strip() for s in re.split(r'(?<=[\.\!\?])\s+', msg) if s.strip()]
+        parts = [s for s in parts if VALUE_LINE.lower() not in s.lower()]
+        return " ".join(parts).strip()
+    return msg
+
+def _call(messages):
+    return client.chat.completions.create(
+        model=MODEL, messages=messages, temperature=0.2
+    )
+
 def _build_messages(ctx: dict, text: str) -> List[Dict[str, str]]:
     msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
     msisdn = (ctx or {}).get("msisdn", "")
     if msisdn:
-        msgs += _thread_history(msisdn, limit=12)  # feed both sides for memory/anti-repeat
+        msgs += _thread_history(msisdn, limit=14)
     msgs.append({"role": "user", "content": text})
     return msgs
 
-def _call(messages):
-    # low temp for consistency; we rely on the prompt for style & logic
-    return client.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        temperature=0.2,
-    )
-
-# ==== Main generator (no hardcoded routers, no fallbacks) ====
+# ==== Main generator ====
 def generate_reply_lt(ctx: dict, text: str) -> str:
-    # Debug peek
+    # Debug control
     t_raw = (text or "").strip()
     t = t_raw.lstrip("\\").lower()
     if t in {"!prompt", "!pf", "##prompt##"}:
         return (f"{PROMPT_SHA} {MODEL}")[:160]
 
-    # Let the LLM semantically understand & respond
+    history = _thread_history((ctx or {}).get("msisdn",""), limit=14)
+
+    # HARD STOP: if we already handed off, never reply again
+    if _assistant_has(history, CLOSE_TX.lower()):
+        return ""  # your API treats empty as “no outbound SMS”
+
+    # Let the model semantically answer + ask exactly one qualifier
     r = _call(_build_messages(ctx, text))
     reply = (r.choices[0].message.content or "").strip()
-    return _final_sms(_polish(reply))
 
-# ==== Classifier (kept for API compatibility; semantic-only) ====
+    # Never repeat the offer value line
+    reply = _strip_repeated_value_line(reply, history)
+
+    # Final polish and length guard
+    reply = _polish(reply).strip()
+
+    # If the model accidentally outputs only the offer line again (after stripping), skip sending
+    if not reply:
+        return ""
+
+    # If this is already the closing message, next inbound will be suppressed by the guard above
+    return _final_sms(reply)
+
+# ==== Classifier (unchanged API; semantic via model) ====
 def classify_lt(text: str) -> dict:
     sys = (
         "Klasifikuok lietuvišką SMS į: 'questions', 'not_interested', arba 'other'. "
@@ -124,8 +162,7 @@ def classify_lt(text: str) -> dict:
         "Atsakyk tik JSON."
     )
     r = client.chat.completions.create(
-        model=MODEL,
-        temperature=0,
+        model=MODEL, temperature=0,
         messages=[{"role":"system","content":sys},{"role":"user","content":text}],
     )
     content = (r.choices[0].message.content or "").strip()
@@ -137,5 +174,4 @@ def classify_lt(text: str) -> dict:
             intent = "other"
         return {"intent": intent, "confidence": conf}
     except Exception:
-        # semantic-only path: if it fails to parse, call it 'other'
         return {"intent": "other", "confidence": 0.5}
