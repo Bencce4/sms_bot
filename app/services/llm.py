@@ -49,6 +49,20 @@ Output
 – Return only the message text. No JSON/markdown/explanations.
 """
 
+
+import hashlib
+PROMPT_SHA = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()[:12]
+
+def prompt_info() -> str:
+    return f"PROMPT_SHA={PROMPT_SHA} MODEL={MODEL}"
+
+# Optional: log once on import so you also see it in server logs
+try:
+    print(f"[llm] {prompt_info()}", flush=True)
+except Exception:
+    pass
+
+
 # ==== History (DB) ====
 def _thread_history(phone: str, limit: int = 12) -> List[Dict[str,str]]:
     if not phone:
@@ -263,6 +277,11 @@ def _call(messages):
 
 # ==== Main generator ====
 def generate_reply_lt(ctx: dict, text: str) -> str:
+
+    t = (text or "").strip().lower()
+    if t in {"!prompt", "!pf", "##prompt##"}:
+        return f"{PROMPT_SHA} {MODEL}"
+
     history = _thread_history((ctx or {}).get("msisdn",""), limit=12)
     prev_sents = _assistant_sentences(history)
     user_text = text or ""
