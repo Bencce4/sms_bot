@@ -159,9 +159,11 @@ async def _maybe_start_poller():
 async def send(payload: dict):
     if not within_business_hours():
         raise HTTPException(400, "Outside business hours (09:00–18:00)")
-
+    
     to = payload["to"]
-    body = payload["body"]
+    body = payload.get("body") or payload.get("text")
+    if not body:
+        raise HTTPException(400, "Missing body/text")
     userref = payload.get("userref")
 
     db = SessionLocal()
