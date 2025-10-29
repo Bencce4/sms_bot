@@ -130,8 +130,11 @@ class InfobipProvider:
     def __init__(self, dry_run: bool = False):
         self.api_base = (os.getenv("INFOBIP_API_BASE", "") or os.getenv("INFOBIP_BASE", "")).rstrip("/")
         self.api_key = os.getenv("INFOBIP_API_KEY", "")
-        self.sender = os.getenv("INFOBIP_SENDER", "")
+        self.sender  = os.getenv("INFOBIP_SENDER", "")
         self.dry_run = dry_run
+
+    def is_enabled(self) -> bool:
+        return bool(self.api_base and self.api_key and self.sender)
 
     # ---------- capability ----------
 
