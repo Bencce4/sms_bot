@@ -15,6 +15,8 @@ from app.providers import infobip as infobip_mod
 from fastapi.staticfiles import StaticFiles
 from app.routers.admin import router as admin_router
 
+from fastapi.responses import JSONResponse
+
 # LLM
 from app.services.llm import classify_lt, generate_reply_lt
 
