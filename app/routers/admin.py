@@ -12,8 +12,8 @@ from app.util.logger import get_logger
 
 log = get_logger("admin")
 router = APIRouter()
-
-templates = from pathlib import Path
+from pathlib import Path
+templates = Jinja2Templates(directory=str((Path(__file__).resolve().parent.parent)/"templates"))
 templates = Jinja2Templates(directory=str((Path(__file__).resolve().parent.parent)/"templates"))
 
 @router.get("/admin", response_class=HTMLResponse)
