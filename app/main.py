@@ -296,3 +296,8 @@ async def send_batch(payload: dict):
         except Exception as e:
             results.append({"to": item.get("to"), "ok": False, "error": str(e)})
     return {"results": results}
+
+
+@app.get("/health")
+def health():
+    return JSONResponse({"ok": True})
