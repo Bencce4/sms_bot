@@ -1,18 +1,16 @@
-# (you can remove the "version" line — v2 ignores it and warns)
 services:
   app:
     build: ./app
     env_file:
       - ./.env.prod
     environment:
-      PYTHONPATH: /srv
+      PYTHONPATH: /srv/app
     volumes:
-      - ./app/data:/srv/app/data          # <-- add this
+      - ./app/data:/srv/app/data
     depends_on:
       - db
     networks: [internal]
     restart: always
-
 
   db:
     image: postgres:16
@@ -34,7 +32,8 @@ services:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile
       - caddydata:/data
       - caddyconfig:/config
-    depends_on: [app]
+    depends_on:
+      - app
     networks: [internal, public]
     restart: always
 
@@ -46,4 +45,3 @@ volumes:
   pgdata: {}
   caddydata: {}
   caddyconfig: {}
-
