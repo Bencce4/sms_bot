@@ -12,6 +12,9 @@ from app.storage.models import Contact, Thread, Message
 from app.providers.base import SmsProvider  # noop/dry-run provider
 from app.providers import infobip as infobip_mod
 
+from fastapi.staticfiles import StaticFiles
+from app.routers.admin import router as admin_router
+
 # LLM
 from app.services.llm import classify_lt, generate_reply_lt
 
@@ -20,6 +23,11 @@ from app.services.llm import classify_lt, generate_reply_lt
 # -----------------------------------------------------------------------------
 app = FastAPI(title="sms-bot")
 Base.metadata.create_all(bind=engine)
+
+# Mount static for the tiny UI
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
+# Admin UI routes
+app.include_router(admin_router)
 
 # -----------------------------------------------------------------------------
 # Config

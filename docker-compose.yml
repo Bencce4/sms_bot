@@ -1,18 +1,18 @@
 # (you can remove the "version" line — v2 ignores it and warns)
 services:
   app:
-    build: ./app                # expects app/Dockerfile
+    build: ./app
     env_file:
       - ./.env.prod
     environment:
-      PYTHONPATH: /srv          # <— add this so "import app" works
-    # Optional in dev for hot code edits:
-    # volumes:
-    #   - ./app:/srv/app:ro
+      PYTHONPATH: /srv
+    volumes:
+      - ./app/data:/srv/app/data          # <-- add this
     depends_on:
       - db
     networks: [internal]
     restart: always
+
 
   db:
     image: postgres:16
@@ -46,3 +46,4 @@ volumes:
   pgdata: {}
   caddydata: {}
   caddyconfig: {}
+

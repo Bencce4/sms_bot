@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block content %}
+<section>
+  <h2>Matches</h2>
+  <form action="/admin/preview" method="post">
+    <label>City:
+      <select name="city">
+        <option value="">(any)</option>
+        {% for c in cities %}
+          <option value="{{ c }}" {% if city_sel==c %}selected{% endif %}>{{ c }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Specialybė:
+      <select name="prof">
+        <option value="">(any)</option>
+        {% for p in profs %}
+          <option value="{{ p }}" {% if prof_sel==p %}selected{% endif %}>{{ p }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>How many candidates:
+      <input type="number" name="limit" value="{{ limit or 20 }}" min="1" max="1000">
+    </label>
+    <button type="submit">Preview</button>
+  </form>
+
+  <p>Total matches in this filter: <strong>{{ total }}</strong> (showing up to limit)</p>
+
+  <form action="/admin/send" method="post" onsubmit="return confirm('Send SMS to the preview set?');">
+    <input type="hidden" name="city" value="{{ city_sel or '' }}">
+    <input type="hidden" name="prof" value="{{ prof_sel or '' }}">
+    <input type="hidden" name="limit" value="{{ limit or 20 }}">
+    <button class="send" type="submit">Send to previewed list</button>
+  </form>
+
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Kandidatas</th>
+        <th>Tel.</th>
+        <th>Miestas</th>
+        <th>Kvalifikacija</th>
+        <th>Projektas</th>
+        <th>Specialybė</th>
+        <th>Kontaktas</th>
+        <th>SMS tekstas (preview)</th>
+        <th>Tipas</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.match_id }}</td>
+        <td>{{ r["Vardas pavardė"] }}</td>
+        <td>{{ r["Tel. nr"] }}</td>
+        <td>{{ r["Miestas"] }}</td>
+        <td>{{ r["Kvalifikacija"] }}</td>
+        <td>{{ r["Objektas"] }}</td>
+        <td>{{ r["Specialybė"] }}</td>
+        <td>{{ r["Asmuo"] }} / {{ r["Telefonas"] }}</td>
+        <td><pre>{{ r.sms_text }}</pre></td>
+        <td>{{ r.match_type }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

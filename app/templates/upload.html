@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<section>
+  <h2>Upload Excel (.xlsx) with two sheets: Kandidatas & Projektai</h2>
+  <form action="/admin/upload" method="post" enctype="multipart/form-data">
+    <input type="file" name="file" accept=".xlsx,.xls" required>
+    <button type="submit">Upload & Parse</button>
+  </form>
+  {% if last_excel %}
+  <p>Last file: <code>{{ last_excel }}</code></p>
+  <p><a class="btn" href="/admin/parse">Re-parse last file</a></p>
+  {% endif %}
+  {% if have_matches %}
+  <p><a class="btn" href="/admin/parse">View Matches</a></p>
+  {% endif %}
+</section>
+{% endblock %}
