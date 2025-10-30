@@ -8,7 +8,7 @@ import pandas as pd
 from app.services.storage import save_upload, latest_excel_path, load_sheets, save_matches, load_matches
 from app.services.matcher import build_matches
 from app.senders.infobip_client import send_sms
-from app.util.logging import get_logger
+from app.util.logger import get_logger
 
 log = get_logger("admin")
 router = APIRouter()
