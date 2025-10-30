@@ -2,7 +2,7 @@ import os
 import logging
 from datetime import datetime, time as dtime
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Query
 from sqlalchemy import desc
 
 from app.storage.db import Base, engine, SessionLocal
@@ -168,8 +168,8 @@ async def _maybe_start_poller():
 # Outbound send (opener or manual)
 # -----------------------------------------------------------------------------
 @app.post("/send")
-async def send(payload: dict):
-    if not within_business_hours():
+async def send(payload: dict, force: bool = Query(False)):
+    if not force and not within_business_hours():
         raise HTTPException(400, "Outside business hours (09:00–18:00)")
     
     to = payload["to"]
@@ -282,14 +282,14 @@ async def mo(req: Request):
 # Batch sender (reuses /send)
 # -----------------------------------------------------------------------------
 @app.post("/send-batch")
-async def send_batch(payload: dict):
+async def send_batch(payload: dict, force: bool = Query(False)):
     """
     payload: { "items": [ { "to": "...", "body": "...", "userref": "..." }, ... ] }
     """
     results = []
     for item in payload.get("items", []):
         try:
-            r = await send(item)
+            r = await send(item, force=force)
             results.append({"to": item["to"], "ok": True, "id": r["id"]})
         except HTTPException as e:
             results.append({"to": item.get("to"), "ok": False, "error": e.detail})
