@@ -5,3 +5,6 @@ dev.db
 .env*
 .env
 .env.*
+
+.env
+.env.prod

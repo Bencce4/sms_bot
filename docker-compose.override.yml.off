@@ -1,0 +1,5 @@
+services:
+  app:
+    env_file:
+      - ./.env.prod
+      - /etc/sms_bot/.env
