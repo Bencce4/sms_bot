@@ -1,0 +1,8 @@
+<!doctype html><meta charset="utf-8"><title>SMS Admin</title>
+<h2>SMS Admin</h2>
+<p>APP_ENV={{ app_env }} • DRY_RUN={{ dry_run }}</p>
+<form action="/admin/upload" method="post" enctype="multipart/form-data">
+  <input type="file" name="file" accept=".xlsx,.xls" required>
+  <button type="submit">Upload</button>
+</form>
+{% if latest_path %}<p>Latest file: {{ latest_path }}</p>{% endif %}
