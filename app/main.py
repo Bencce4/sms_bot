@@ -25,7 +25,11 @@ app = FastAPI(title="sms-bot")
 Base.metadata.create_all(bind=engine)
 
 # Mount static for the tiny UI
-app.mount("/static", StaticFiles(directory="app/static"), name="static")
+from pathlib import Path
+static_dir = Path(__file__).parent / "static"
+if static_dir.exists():
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
 # Admin UI routes
 app.include_router(admin_router)
 
