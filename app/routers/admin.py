@@ -5,7 +5,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 import pandas as pd
 
-from app.services.storage import save_upload, latest_excel_path, load_sheets, save_matches, load_matches
+from app.services.storage import save_upload, latest_excel_path, load_sheets, save_matches_df, load_matches
 from app.services.matcher import build_matches
 from app.senders.infobip_client import send_sms
 from app.util.logger import get_logger
@@ -13,7 +13,8 @@ from app.util.logger import get_logger
 log = get_logger("admin")
 router = APIRouter()
 
-templates = Jinja2Templates(directory="app/templates")
+templates = from pathlib import Path
+templates = Jinja2Templates(directory=str((Path(__file__).resolve().parent.parent)/"templates"))
 
 @router.get("/admin", response_class=HTMLResponse)
 def admin_home(request: Request):
@@ -35,7 +36,7 @@ def admin_parse(request: Request):
         return RedirectResponse(url="/admin", status_code=303)
     people, projects = load_sheets(path)
     matches_df = build_matches(people, projects)
-    save_matches(matches_df)
+    save_matches_df(matches_df)
     cities = sorted({m.get("Miestas","") for m in matches_df.to_dict(orient="records")})
     profs = sorted({m.get("Specialybė","") for m in matches_df.to_dict(orient="records")})
     return templates.TemplateResponse("matches.html", {
