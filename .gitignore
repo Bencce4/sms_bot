@@ -8,3 +8,11 @@ dev.db
 
 .env
 .env.prod
+.venv
+.env
+*.pyc
+__pycache__/
+app/data/
+logs/
+Dockerfile.new
+docker-compose.override.*

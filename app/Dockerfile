@@ -15,4 +15,4 @@ RUN python -m pip install --upgrade pip && \
     pip install -r /srv/app/requirements.txt
 
 # Add the app code after deps to leverage layer caching
-COPY . /srv/app
+COPY . /srv/app/app
