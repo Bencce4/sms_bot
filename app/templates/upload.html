@@ -1,12 +1,17 @@
-<!doctype html><meta charset="utf-8">
-<title>SMS Admin</title>
-<style>body{font-family:system-ui;margin:24px;max-width:1000px}</style>
-<h2>SMS Admin</h2>
-<p>Env: {{ app_env }} • Dry-run: {{ dry_run }}</p>
-<h3>Upload Excel</h3>
-<form action="/admin/upload" method="post" enctype="multipart/form-data">
-  <input type="file" name="file" accept=".xlsx,.xls" required>
-  <button>Upload</button>
+{% extends "base.html" %}
+{% block content %}
+<p>Env: {{ env }} • Dry-run: {{ 'on' if dry_run else 'off' }}</p>
+
+<h2>Upload Excel</h2>
+<form method="post" action="/admin/upload" enctype="multipart/form-data">
+  <input type="file" name="file" />
+  <button type="submit">Upload</button>
 </form>
-{% if last_excel %}<p>Latest: {{ last_excel }}</p>{% endif %}
-{% if have_matches %}<p>Matches CSV exists.</p>{% endif %}
+
+{% if last_excel %}
+  <p>Last file: {{ last_excel }}</p>
+{% endif %}
+{% if have_matches %}
+  <p><a href="/admin/parse">Preview matches</a></p>
+{% endif %}
+{% endblock %}

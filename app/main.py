@@ -24,6 +24,10 @@ from app.services.llm import classify_lt, generate_reply_lt
 # App + DB
 # -----------------------------------------------------------------------------
 app = FastAPI(title="sms-bot")
+
+# expose env flags for templates
+app.state.env = os.getenv("APP_ENV", "local")
+app.state.dry_run = os.getenv("DRY_RUN", "1") in ("1", "true", "True", 1, True)
 Base.metadata.create_all(bind=engine)
 
 # Mount static for the tiny UI

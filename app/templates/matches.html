@@ -1,70 +1,66 @@
 {% extends "base.html" %}
 {% block content %}
-<section>
-  <h2>Matches</h2>
-  <form action="/admin/preview" method="post">
-    <label>City:
-      <select name="city">
-        <option value="">(any)</option>
-        {% for c in cities %}
-          <option value="{{ c }}" {% if city_sel==c %}selected{% endif %}>{{ c }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label>Specialybė:
-      <select name="prof">
-        <option value="">(any)</option>
-        {% for p in profs %}
-          <option value="{{ p }}" {% if prof_sel==p %}selected{% endif %}>{{ p }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label>How many candidates:
-      <input type="number" name="limit" value="{{ limit or 20 }}" min="1" max="1000">
-    </label>
-    <button type="submit">Preview</button>
-  </form>
+<h2>Preview & Filter</h2>
 
-  <p>Total matches in this filter: <strong>{{ total }}</strong> (showing up to limit)</p>
+<form method="post" action="/admin/preview">
+  <label>City</label>
+  <select name="city">
+    <option value="">All</option>
+    {% for c in cities %}
+      <option value="{{ c }}" {% if city_sel==c %}selected{% endif %}>{{ c }}</option>
+    {% endfor %}
+  </select>
 
-  <form action="/admin/send" method="post" onsubmit="return confirm('Send SMS to the preview set?');">
-    <input type="hidden" name="city" value="{{ city_sel or '' }}">
-    <input type="hidden" name="prof" value="{{ prof_sel or '' }}">
-    <input type="hidden" name="limit" value="{{ limit or 20 }}">
-    <button class="send" type="submit">Send to previewed list</button>
-  </form>
+  <label>Profession</label>
+  <select name="prof">
+    <option value="">All</option>
+    {% for p in profs %}
+      <option value="{{ p }}" {% if prof_sel==p %}selected{% endif %}>{{ p }}</option>
+    {% endfor %}
+  </select>
 
-  <table>
-    <thead>
-      <tr>
-        <th>#</th>
-        <th>Kandidatas</th>
-        <th>Tel.</th>
-        <th>Miestas</th>
-        <th>Kvalifikacija</th>
-        <th>Projektas</th>
-        <th>Specialybė</th>
-        <th>Kontaktas</th>
-        <th>SMS tekstas (preview)</th>
-        <th>Tipas</th>
-      </tr>
-    </thead>
+  <label>Limit</label>
+  <input type="number" name="limit" min="1" max="1000" value="{{ limit }}" />
+  <button type="submit">Preview</button>
+</form>
+
+<p>Total in filter: {{ total }}</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>match_id</th>
+      <th>Miestas</th>
+      <th>Specialybė</th>
+      <th>Tel. nr</th>
+      <th>sms_text</th>
+    </tr>
+  </thead>
     <tbody>
-      {% for r in rows %}
-      <tr>
-        <td>{{ r.match_id }}</td>
-        <td>{{ r["Vardas pavardė"] }}</td>
-        <td>{{ r["Tel. nr"] }}</td>
-        <td>{{ r["Miestas"] }}</td>
-        <td>{{ r["Kvalifikacija"] }}</td>
-        <td>{{ r["Objektas"] }}</td>
-        <td>{{ r["Specialybė"] }}</td>
-        <td>{{ r["Asmuo"] }} / {{ r["Telefonas"] }}</td>
-        <td><pre>{{ r.sms_text }}</pre></td>
-        <td>{{ r.match_type }}</td>
-      </tr>
-      {% endfor %}
+    {% if rows and rows|length > 0 %}
+        {% for m in rows %}
+        <tr>
+        <td>{{ m.match_id }}</td>
+        <td>{{ m.Miestas }}</td>
+        <td>{{ m.Specialybė }}</td>
+        <td>{{ m["Tel. nr"] }}</td>
+        <td>{{ m.sms_text }}</td>
+        </tr>
+        {% endfor %}
+    {% else %}
+        <tr>
+        <td colspan="5" style="text-align:center; color:#666;">
+            No matches found for the current data. Check city/profession or project “Aktualūs”.
+        </td>
+        </tr>
+    {% endif %}
     </tbody>
-  </table>
-</section>
+</table>
+
+<form method="post" action="/admin/send">
+  <input type="hidden" name="city" value="{{ city_sel or '' }}">
+  <input type="hidden" name="prof" value="{{ prof_sel or '' }}">
+  <input type="hidden" name="limit" value="{{ limit }}">
+<button type="submit" class="btn" {% if not rows or rows|length == 0 %}disabled{% endif %}>Send</button>
+</form>
 {% endblock %}

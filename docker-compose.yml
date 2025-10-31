@@ -1,12 +1,13 @@
 services:
   app:
-    build: ./app
-    env_file:
-      - ./.env.prod
+    build:
+      context: .              # repo root
+      dockerfile: Dockerfile  # the root Dockerfile above
     environment:
       PYTHONPATH: /srv/app
-    volumes:
-      - ./app/data:/srv/app/data
+    # DO NOT mount ./app to /srv/app or /srv/app/app (that would hide files)
+    # volumes:
+    #   - .:/srv/app     # enable only for local dev if you want live-reload
     depends_on:
       - db
     networks: [internal]

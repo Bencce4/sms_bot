@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Send results</h2>
+<p>OK: {{ ok }} — Failed: {{ fail }}</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>match_id</th>
+      <th>ok</th>
+      <th>err</th>
+      <th>resp</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in results %}
+    <tr>
+      <td>{{ r.get('match_id') }}</td>
+      <td>{{ '✓' if (r.get('ok')) else '✗' }}</td>
+      <td>{{ r.get('err','') }}</td>
+      <td>{{ r.get('resp','') }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<p><a href="/admin">Back</a></p>
+{% endblock %}
