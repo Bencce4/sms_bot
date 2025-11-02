@@ -1,13 +1,13 @@
 services:
   app:
     build:
-      context: .              # repo root
-      dockerfile: Dockerfile  # the root Dockerfile above
+      context: .
+      dockerfile: Dockerfile
     environment:
       PYTHONPATH: /srv/app
-    # DO NOT mount ./app to /srv/app or /srv/app/app (that would hide files)
-    # volumes:
-    #   - .:/srv/app     # enable only for local dev if you want live-reload
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      LLM_REPLY_MODEL: ${LLM_REPLY_MODEL:-gpt-4o-mini}
     depends_on:
       - db
     networks: [internal]
