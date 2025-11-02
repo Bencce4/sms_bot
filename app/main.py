@@ -19,16 +19,24 @@ from fastapi.responses import JSONResponse
 
 # LLM
 from app.services.llm import classify_lt, generate_reply_lt
-
+from app.routers.admin import router as admin_router
+from app.routers.chat import router as chat_router
 # -----------------------------------------------------------------------------
 # App + DB
 # -----------------------------------------------------------------------------
-app = FastAPI(title="sms-bot")
+app = FastAPI(title="SMS Bot")
+
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
+app.include_router(admin_router, prefix="/admin")
+app.include_router(chat_router)
+
 
 # expose env flags for templates
 app.state.env = os.getenv("APP_ENV", "local")
 app.state.dry_run = os.getenv("DRY_RUN", "1") in ("1", "true", "True", 1, True)
 Base.metadata.create_all(bind=engine)
+
 
 # Mount static for the tiny UI
 from pathlib import Path

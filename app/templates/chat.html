@@ -1,0 +1,74 @@
+<!-- app/templates/chat.html -->
+{% extends "base.html" %}
+{% block content %}
+<h2>Testinė pokalbių dėžutė</h2>
+<p class="muted">Dialogai nesiunčiami per SMS – tai tik bandymų aplinka.</p>
+
+<div id="chat" class="chat-box">
+  {% for m in history %}
+    <div class="msg {{ 'me' if m.role=='user' else 'bot' }}">
+      <div class="bubble"><strong>{{ 'Jūs' if m.role=='user' else 'Asistentas' }}:</strong> {{ m.content }}</div>
+    </div>
+  {% endfor %}
+</div>
+
+<form id="f" class="row">
+  <input type="hidden" name="conv_id" id="conv_id" value="{{ conv_id }}">
+  <input type="text" id="text" name="text" placeholder="Įrašykite žinutę..." autocomplete="off" required>
+  <button type="submit">Siųsti</button>
+</form>
+
+
+<form action="/chat/new" method="post" style="display:inline">
+  <button type="submit">New chat</button>
+</form>
+
+<form action="/chat/reset" method="post" style="display:inline; margin-left:8px">
+  <input type="hidden" name="cid" value="{{ cid }}">
+  <button type="submit">Reset this chat</button>
+</form>
+
+
+<script>
+const $f = document.getElementById('f');
+const $chat = document.getElementById('chat');
+const $text = document.getElementById('text');
+
+function add(role, content){
+  const div = document.createElement('div');
+  div.className = 'msg ' + (role==='user' ? 'me' : 'bot');
+  div.innerHTML = `<div class="bubble"><strong>${role==='user'?'Jūs':'Asistentas'}:</strong> ${content}</div>`;
+  $chat.appendChild(div);
+  $chat.scrollTop = $chat.scrollHeight;
+}
+
+$f.onsubmit = async (e) => {
+  e.preventDefault();
+  const conv_id = document.getElementById('conv_id').value;
+  const text = $text.value.trim();
+  if(!text) return;
+  add('user', text);
+  $text.value = '';
+  const fd = new FormData();
+  fd.append('conv_id', conv_id);
+  fd.append('text', text);
+  const r = await fetch('/chat/send', { method:'POST', body: fd });
+  const j = await r.json();
+  if(j.reply){ add('assistant', j.reply); }
+  else { add('assistant', 'Klaida.'); }
+};
+</script>
+
+<style>
+.chat-box{max-height:60vh;overflow:auto;border:1px solid #ddd;padding:12px;border-radius:8px;background:#fff;}
+.msg{margin:6px 0;display:flex}
+.msg.me{justify-content:flex-end}
+.bubble{max-width:70%;padding:8px 10px;border-radius:10px;}
+.msg.me .bubble{background:#e6f3ff}
+.msg.bot .bubble{background:#f4f4f4}
+.row{display:flex;gap:8px;margin-top:10px}
+#text{flex:1;padding:8px}
+button{padding:8px 12px}
+.muted{color:#777}
+</style>
+{% endblock %}
