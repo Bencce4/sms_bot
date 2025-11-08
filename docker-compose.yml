@@ -3,14 +3,19 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    volumes:
+      - ./app/creds/sa.json:/srv/app/creds/sa.json:ro
     environment:
+      GSHEETS_SPREADSHEET_ID: ${GSHEETS_SPREADSHEET_ID}
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-/srv/app/creds/sa.json}
       PYTHONPATH: /srv/app
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
       LLM_REPLY_MODEL: ${LLM_REPLY_MODEL:-gpt-4o-mini}
     depends_on:
       - db
-    networks: [internal]
+    networks:
+      - internal
     restart: always
 
   db:
@@ -21,7 +26,8 @@ services:
       POSTGRES_DB: sms
     volumes:
       - pgdata:/var/lib/postgresql/data
-    networks: [internal]
+    networks:
+      - internal
     restart: always
 
   caddy:
@@ -35,7 +41,9 @@ services:
       - caddyconfig:/config
     depends_on:
       - app
-    networks: [internal, public]
+    networks:
+      - internal
+      - public
     restart: always
 
 networks:

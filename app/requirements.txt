@@ -13,3 +13,8 @@ openpyxl==3.1.5
 jinja2==3.1.4
 python-multipart==0.0.12
 rapidfuzz==3.9.6
+
+google-api-python-client
+google-auth
+google-auth-httplib2
+google-auth-oauthlib

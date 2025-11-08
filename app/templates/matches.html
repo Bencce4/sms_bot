@@ -2,7 +2,7 @@
 {% block content %}
 <h2>Preview & Filter</h2>
 
-<form method="post" action="/admin/preview">
+<form method="post" action="/admin/preview" style="margin-bottom:12px;">
   <label>City</label>
   <select name="city">
     <option value="">All</option>
@@ -26,41 +26,73 @@
 
 <p>Total in filter: {{ total }}</p>
 
+<!-- Open selected chats (uses checkboxes below) -->
+<form method="post" action="/admin/open_chats" id="openChatsForm" style="margin:10px 0;">
+  <button type="submit" {% if not rows or rows|length == 0 %}disabled{% endif %}>
+    Open selected chats
+  </button>
+</form>
+
 <table>
   <thead>
     <tr>
+      <th style="width:28px;">
+        <input type="checkbox" id="chkAll" title="Select all">
+      </th>
       <th>match_id</th>
       <th>Miestas</th>
       <th>Specialybė</th>
       <th>Tel. nr</th>
       <th>sms_text</th>
+      <th>Chat</th>
     </tr>
   </thead>
-    <tbody>
+  <tbody>
     {% if rows and rows|length > 0 %}
-        {% for m in rows %}
+      {% for m in rows %}
+        {% set phone = (m["Tel. nr"] or "") %}
         <tr>
-        <td>{{ m.match_id }}</td>
-        <td>{{ m.Miestas }}</td>
-        <td>{{ m.Specialybė }}</td>
-        <td>{{ m["Tel. nr"] }}</td>
-        <td>{{ m.sms_text }}</td>
+          <td>
+            {% if phone %}
+              <input type="checkbox" name="selected" form="openChatsForm" value="{{ phone|trim }}">
+            {% endif %}
+          </td>
+          <td>{{ m.match_id }}</td>
+          <td>{{ m.Miestas }}</td>
+          <td>{{ m.Specialybė }}</td>
+          <td>{{ m["Tel. nr"] }}</td>
+          <td>{{ m.sms_text }}</td>
+          <td>
+            {% if phone %}
+              <a class="btn" href="/admin/chat?phone={{ phone | urlencode }}" target="_blank">Chat</a>
+            {% else %}—{% endif %}
+          </td>
         </tr>
-        {% endfor %}
+      {% endfor %}
     {% else %}
-        <tr>
-        <td colspan="5" style="text-align:center; color:#666;">
-            No matches found for the current data. Check city/profession or project “Aktualūs”.
+      <tr>
+        <td colspan="7" style="text-align:center; color:#666;">
+          No matches found for the current data. Check city/profession or project “Aktualūs”.
         </td>
-        </tr>
+      </tr>
     {% endif %}
-    </tbody>
+  </tbody>
 </table>
 
-<form method="post" action="/admin/send">
+<!-- Keep your existing Send flow -->
+<form method="post" action="/admin/send" style="margin-top:10px;">
   <input type="hidden" name="city" value="{{ city_sel or '' }}">
   <input type="hidden" name="prof" value="{{ prof_sel or '' }}">
   <input type="hidden" name="limit" value="{{ limit }}">
-<button type="submit" class="btn" {% if not rows or rows|length == 0 %}disabled{% endif %}>Send</button>
+  <button type="submit" class="btn" {% if not rows or rows|length == 0 %}disabled{% endif %}>Send</button>
 </form>
+
+<script>
+  const chkAll = document.getElementById('chkAll');
+  if (chkAll) {
+    chkAll.addEventListener('change', () => {
+      document.querySelectorAll('input[type=checkbox][name=selected]').forEach(cb => cb.checked = chkAll.checked);
+    });
+  }
+</script>
 {% endblock %}

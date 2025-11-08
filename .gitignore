@@ -16,3 +16,11 @@ app/data/
 logs/
 Dockerfile.new
 docker-compose.override.*
+.env
+.env.*
+creds/
+*.json
+.venv/
+__pycache__/
+*.pyc
+.DS_Store

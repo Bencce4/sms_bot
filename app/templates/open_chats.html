@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Open chats</title>
+</head>
+<body>
+  <h1>Open chats</h1>
+  <p>{{ msg }}</p>
+
+  {% if links and links|length > 0 %}
+    <p>Opening {{ links|length }} chat windows…</p>
+    <ul>
+      {% for href in links %}
+        <li><a href="{{ href }}" target="_blank" rel="noopener">{{ href }}</a></li>
+      {% endfor %}
+    </ul>
+    <script>
+      (function() {
+        const links = {{ links|tojson }};
+        for (const href of links) {
+          window.open(href, '_blank', 'noopener');
+        }
+      })();
+    </script>
+  {% else %}
+    <p>No chats to open.</p>
+  {% endif %}
+
+  <p><a href="/admin/parse">Back</a></p>
+</body>
+</html>

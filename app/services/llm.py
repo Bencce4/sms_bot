@@ -1,6 +1,6 @@
 # app/services/llm.py
-import os, json, re, hashlib
-from typing import List, Dict, Optional, Tuple
+import os, json, re, hashlib, time
+from typing import List, Dict, Optional
 from sqlalchemy import desc
 from openai import OpenAI
 
@@ -11,58 +11,35 @@ from app.storage.models import Thread, Message
 MODEL = os.getenv("LLM_REPLY_MODEL", os.getenv("LLM_MODEL", "gpt-4o-mini"))
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# ==== Constants ====
-VALUE_LINE = "Siūlome lanksčius grafikus, greitą pradžią ir paprastą procesą įsidarbinant."
-CLOSE_TX   = "Perduosiu kolegai – paskambins dėl detalių."
+# ==== Constants (not templates) ====
+VALUE_LINE   = "Siūlome lanksčius grafikus, greitą pradžią ir paprastą procesą įsidarbinant."
+CLOSE_TX     = "Perduosiu kolegai – paskambins dėl detalių."
+YEAR_MAX     = 70
+HUMAN_CLOSE  = "Ačiū už Jūsų laiką — užsirašiau. " + CLOSE_TX
+TROLL_CLOSE  = "Palikime čia. Jei rimtai domins darbas, parašykite."
+DNC_CLOSE    = "Supratau — daugiau nerašysime. Gražios dienos!"
+FUTURE_CLOSE = f"Puiku — užsirašysiu ateičiai. Iki pasimatymo!"
 
-# ==== Generator SYSTEM PROMPT (zero-shot; free phrasing, strict behavior) ====
-SYSTEM_PROMPT = f"""
-You are an SMS recruiter assistant for Valandinis (valandinis.lt).
-Send ONE short Lithuanian SMS (<=160 chars) that moves the thread forward.
+# ==== SYSTEM PROMPT (rules only) ====
+SYSTEM_PROMPT = """
+You write ONE Lithuanian SMS (≤160 chars) on behalf of Valandinis (valandinis.lt).
 
-Business facts (do not invent specifics):
-- Flexible hourly/shift work in construction & related trades across Lithuania.
-- Quick start and simple process after a short intro.
+Objectives:
+1) Be human: answer the person’s last message first (1 short line), with a warm, non-pushy tone.
+2) Determine interest in THIS opening (city + trade). Treat genuine job/salary/schedule questions as interest — EXCEPT on the very first reply after the opener, where you must ask an explicit interest check instead of closing.
+3) If clearly interested, you may close quickly; otherwise collect years → availability, then close.
 
-Policy:
-- Language: always Lithuanian unless the user writes in RU/EN/UA.
-- Tone: human, brief, friendly, zero bureaucracy. One SMS only.
-- Never ask sensitive data (ID, cards, passwords, exact address, emails, codes). No legal/medical advice.
-- Ignore questions clearly unrelated to the work/projects.
+Hard rules:
+- Lithuanian; 1–2 short sentences; no exclamation spam.
+- Identity only in the first bot message of the thread. Never say you are a bot/AI.
+- Don’t invent pay/clients/precise locations/contract terms; if asked, say it’s best aligned by phone and follow with one helpful next step.
+- City & trade come from the opener; don’t change unless corrected by the person.
+- Slot order: years first, then availability. Never ask availability before years.
+- If user asks to call, you can close immediately.
+- Banned phrase: “Ar aktualu dabar, ar palikti ateičiai?” and any meta like “esu Valandinis.lt”.
 
-Topic discipline:
-- Do NOT introduce pay/client names/precise locations/contract terms unless the USER asked about that topic.
-- For any info normally shared by phone (pay, clients, exact site, contract terms, detailed schedule):
-  say ONE short, natural Lithuanian sentence that we’ll discuss details with a colleague by phone,
-  then continue with exactly ONE next missing slot (years, then availability). Do not repeat wording in the same thread.
-
-Project questions:
-- If asked “kas per projektas?” / “koks objektas?” or user requests more details:
-  briefly describe the type of work in 1 line (generic, no invented names),
-  then continue with the next missing slot (subject to interest gating below). Do NOT add the value line or a probe here.
-
-Conversation logic (strict):
-- City/region and specialty/trade are already known from the opener. Do NOT ask or confirm unless the user contradicts them.
-- Interest gating:
-  • Do NOT ask for years/availability until interest is confirmed (plan.interest == "yes"),
-    OR the user has already provided that slot in their message/history.
-  • If interest is unknown/unsure after the opener, you may ask ONE short clarifying question about interest
-    (do not repeat the opener wording). After that, wait for their answer.
-- Slot order: collect (1) years of experience, then (2) availability.
-  • Do NOT ask about availability until years are known (from plan/history).
-- If the user sounds hesitant (“gal”, “nežinau”, “gal vėliau”…): give a brief reassurance (<=1 sentence).
-  If the value line hasn’t been sent in this thread, include it once: "{VALUE_LINE}". End with “Ką manote?” Stop there.
-- If the user asks a direct question: answer briefly (<=1 sentence) respecting topic discipline,
-  then ask at most ONE next missing slot allowed by the interest gate. Do NOT add the value line or a probe here.
-- Avoid repeating any sentence/idea already sent; never repeat the value line.
-- Do not re-ask whether they are “open” with the same wording as the opener.
-- If plan.intent = decline: thank politely and end. No value line, no further asks.
-- If plan.busy_until is present, treat availability as known.
-- Do NOT label the user’s attitude (“atsargus/atsargi”, “abejojate” as a label). Acknowledge neutrally instead.
-
-Output:
-- Return ONLY the final SMS text in Lithuanian. No JSON. No markdown.
-"""
+Output: ONLY the final SMS text.
+""".strip()
 
 PROMPT_SHA = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()[:12]
 def prompt_info() -> str:
@@ -79,8 +56,7 @@ def _thread_history(phone: str, limit: int = 14) -> List[Dict[str, str]]:
     db = SessionLocal()
     try:
         t = db.query(Thread).filter_by(phone=phone, status="open").first()
-        if not t:
-            return []
+        if not t: return []
         msgs = (
             db.query(Message)
               .filter(Message.thread_id == t.id)
@@ -108,148 +84,297 @@ def _assistant_has(history: List[Dict[str,str]], needle: str) -> bool:
             return True
     return False
 
-def _assistant_has_phrase(history: List[Dict[str,str]], phrase: str) -> bool:
-    p = (phrase or "").lower()
-    for m in history:
-        if m["role"] == "assistant" and p in (m["content"] or "").lower():
-            return True
-    return False
+def _identity_already_used(history: List[Dict[str,str]]) -> bool:
+    return any("valandinis.lt" in (m["content"] or "").lower() for m in history if m["role"]=="assistant")
 
 def _strip_repeated_value_line(msg: str, history: List[Dict[str,str]]) -> str:
-    if not msg:
-        return msg
+    if not msg: return msg
     if _assistant_has(history, VALUE_LINE.lower()):
         parts = [s.strip() for s in re.split(r'(?<=[\.\!\?])\s+', msg) if s.strip()]
         parts = [s for s in parts if VALUE_LINE.lower() not in s.lower()]
         return " ".join(parts).strip()
     return msg
 
-def _count(history: List[Dict[str,str]], role: str) -> int:
-    return sum(1 for m in history if m["role"] == role)
+def _num_user_msgs(history: List[Dict[str,str]]) -> int:
+    return sum(1 for m in history if m["role"] == "user")
 
-def _is_first_user_turn(history: List[Dict[str,str]]) -> bool:
-    return _count(history, "user") == 1
+def _is_first_user_reply_after_opener(history: List[Dict[str,str]]) -> bool:
+    return _num_user_msgs(history) == 1 and any(m["role"]=="assistant" for m in history)
 
-# ==== Lightweight detectors/extractors (kept for guards) ====
-_HESIT_PAT = re.compile(r"\b(gal|galbūt|nezinau|nežinau|pamatysiu|pamąstysiu|gal vėliau|maybe|not sure)\b", re.I)
-def _is_hesitation(text: str) -> bool:
-    return bool(_HESIT_PAT.search(text or ""))
+def _last_assistant_text(history: List[Dict[str,str]]) -> str:
+    for m in reversed(history):
+        if m["role"] == "assistant":
+            return (m.get("content") or "")
+    return ""
 
-_YEARS_PAT = re.compile(r"\b([0-3]?\d)\s*(m\.|metai|metu|metus)\b", re.I)
-_AVAIL_PAT = re.compile(r"\b(nuo\s+[\w\-\.]+|rytoj|šiandien|kit(a|ą)\s+savait(ė|e)|nuo\s+kitos\savait(ė|e)|iškart)\b", re.I)
+# ==== Robust "already closed" detection ====
+def _norm(s: str) -> str:
+    s = (s or "").lower()
+    s = re.sub(r"[–—−-]", "-", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"[\.!\s]+$", "", s)
+    s = s.replace("ė", "e").replace("ą","a").replace("č","c").replace("ę","e").replace("į","i").replace("š","s").replace("ų","u").replace("ū","u").replace("ž","z")
+    return s
 
-def _extract_years(text: str) -> Optional[int]:
-    m = _YEARS_PAT.search(text or "")
-    if not m: return None
-    try:
-        return int(m.group(1))
-    except Exception:
+CLOSE_PATTERNS = [
+    re.compile(r"\bperduos(iu|iu)\s+koleg\w+.*\bpaskambins\b"),
+    re.compile(r"\baci(u|u)\s+uz\s+(jusu\s+)?laika.*\bperduos(iu|iu)\s+koleg\w+\b"),
+    re.compile(r"\bsupratau\s*-\s*daugiau\s+nerasysime\b"),
+    re.compile(r"\buzsirasi(si(u|u)|au)\s+ateiciai\b"),
+    re.compile(r"\bpalikime\s+cia\b"),
+]
+POSTCLOSE_ACK_RE = re.compile(r"\b(ačiū|aciu|dėkui|dekui|ir\s+jums|geros\s+dienos|ok|okey|okei|👍|thanks)\b", re.I)
+
+def _assistant_last_was_close(history: List[Dict[str,str]]) -> bool:
+    last = _norm(_last_assistant_text(history))
+    if not last:
+        return False
+    if ("perduosiu koleg" in last and "paskambins" in last) or \
+       ("daugiau nerasysime" in last) or \
+       ("uzsirasi" in last and "ateiciai" in last) or \
+       ("palikime cia" in last) or \
+       ("puiku - uzsirasysiu ateiciai" in last):
+        return True
+    return any(rx.search(last) for rx in CLOSE_PATTERNS)
+
+def _last_close_type(history: List[Dict[str,str]]) -> Optional[str]:
+    last = _norm(_last_assistant_text(history))
+    if not last:
         return None
+    hc = _norm(HUMAN_CLOSE)
+    dc = _norm(DNC_CLOSE)
+    fc = _norm(FUTURE_CLOSE)
+    tx = _norm(CLOSE_TX)
+    tc = _norm(TROLL_CLOSE)
+
+    if hc in last or tx in last or ("perduosiu koleg" in last and "paskambins" in last):
+        return "human"
+    if fc in last or ("uzsirasi" in last and "ateiciai" in last):
+        return "future"
+    if dc in last or "daugiau nerasysime" in last:
+        return "dnc"
+    if tc in last or "palikime cia" in last:
+        return "troll"
+
+    for rx in CLOSE_PATTERNS:
+        if rx.search(last):
+            if "daugiau nerasysime" in last:
+                return "dnc"
+            if "ateiciai" in last:
+                return "future"
+            if "paskambins" in last:
+                return "human"
+            return "human"
+    return None
+
+# ==== Lightweight extractors ====
+_YEARS_PAT  = re.compile(r"\b([0-9]{1,3})\s*(m\.|metai|metu|metus)\b", re.I)
+_MONTHS_PAT = re.compile(r"\b([0-9]{1,3})\s*(m[eė]n\.?|m[eė]nes(?:iai|ius|i|į)?)\b", re.I)
+_WEEKS_PAT  = re.compile(r"\b([0-9]{1,3})\s*(sav(?:ait[ėe]s?)?)\b", re.I)
+_DAYS_PAT   = re.compile(r"\b([0-9]{1,3})\s*(dien(?:a|os)?)\b", re.I)
+_AVAIL_PAT  = re.compile(r"\b(nuo\s+[\w\-\.]+|rytoj|šiandien|kit(a|ą)\s+savait(ė|e)|nuo\s+kitos\s+savait(ė|e)|iškart)\b", re.I)
+
+AGE_Q_PAT   = re.compile(r"\b(nuo\s+kiek\s+met(ų|u)|kiek\s+met(ų|u)\s+galima\s+dirbti|priimate\s+nuo\s+kiek|įdarbinate\s+nuo)\b", re.I)
+AGE_VAL_PAT = re.compile(r"\b(man\s+)?([0-9]{1,2})\s*m(et(ų|u)|\.)\b", re.I)
+
+SAL_KWS     = re.compile(r"\b(alga|atlyg|įkain|tarif|mok(at|ėt)|eur|€|rate|pay|klient|lokacij|adresas|tiksli\s+vieta)\w*\b", re.I)
+
+OPENER_SPEC_PAT_A = re.compile(r"ieškome\s+([a-ząčęėįšųūž\-]+)", re.I)
+OPENER_SPEC_PAT_B = re.compile(r"kuriame\s+reikalingas\s+([a-ząčęėįšųūž\-]+)", re.I)
+USER_TRADE_PAT    = re.compile(r"\b(aš|as)?\s*(esu|es[uū])?\s*([a-ząčęėįšųūž\-]+inkas|elektrikas|santechnikas|mūrininkas|dažytojas|apdailininkas|stogdengys|suvirintojas|tinkuotojas|plytelių\s+klojėjas)\b", re.I)
+
+def _parse_experience_years(text: str) -> Optional[int]:
+    t = text or ""
+    if _MONTHS_PAT.search(t) or _WEEKS_PAT.search(t) or _DAYS_PAT.search(t): return 0
+    m = _YEARS_PAT.search(t)
+    if not m: return None
+    try: yrs = int(m.group(1))
+    except Exception: return None
+    if yrs < 0 or yrs > YEAR_MAX: return None
+    return yrs
 
 def _extract_availability(text: str) -> Optional[str]:
     m = _AVAIL_PAT.search(text or "")
     return m.group(0) if m else None
 
-def _asked_which_slot(msg: str) -> Optional[str]:
-    s = (msg or "").lower()
-    if "kiek metų patirties" in s:
-        return "years"
-    if "nuo kada galėtumėte pradėti" in s or "koks grafikas tinka" in s:
-        return "availability"
+def _extract_opener_specialty(history: List[Dict[str,str]]) -> Optional[str]:
+    for m in history:
+        if m["role"] != "assistant": continue
+        txt = m.get("content") or ""
+        for pat in (OPENER_SPEC_PAT_A, OPENER_SPEC_PAT_B):
+            mt = pat.search(txt)
+            if mt: return mt.group(1).lower()
     return None
 
-def _last_user_reply(history: List[Dict[str,str]]) -> str:
-    for m in reversed(history):
-        if m["role"] == "user":
-            return m["content"] or ""
-    return ""
+def _extract_user_trade(text: str) -> Optional[str]:
+    m = USER_TRADE_PAT.search(text or "")
+    if not m: return None
+    return (m.group(0) or "").strip().lower()
+
+def _asked_which_slot(msg: str) -> Optional[str]:
+    s = (msg or "").lower()
+    if "kiek metų patirties" in s: return "years"
+    if "nuo kada galėtumėte pradėti" in s or "koks grafikas tinka" in s: return "availability"
+    return None
 
 def _inferred_slots(history: List[Dict[str,str]]) -> Dict[str, Optional[str]]:
     slots = {"years": None, "availability": None}
     for i in range(len(history)-2, -1, -1):
-        a = history[i]
-        b = history[i+1] if i+1 < len(history) else None
+        a = history[i]; b = history[i+1] if i+1 < len(history) else None
         if not b: continue
         if a["role"] == "assistant" and b["role"] == "user":
             which = _asked_which_slot(a.get("content",""))
             if not which: continue
             ans = (b.get("content") or "").strip()
             if which == "years":
-                y = _extract_years(ans)
-                slots["years"] = str(y) if y is not None else None
+                if AGE_VAL_PAT.search(ans) and "patirt" not in ans.lower():
+                    y = None
+                else:
+                    y = _parse_experience_years(ans)
+                slots["years"] = y
             elif which == "availability":
                 slots["availability"] = _extract_availability(ans) or None
     return slots
 
-def _next_missing_slot(slots: Dict[str, Optional[str]]) -> Optional[str]:
-    order = ["years", "availability"]
-    for k in order:
-        if not slots.get(k):
-            return k
+# ==== Question detection / acks ====
+QUESTION_INTENTS = {"project_question","direct_question","salary_question","schedule_question","location_question"}
+LT_Q_WORDS = re.compile(r"\b(kas|koks|kokia|kada|kur|kaip|kiek|del ko|dėl ko)\b", re.I)
+def _looks_like_question(txt: str) -> bool:
+    t = (txt or "").strip()
+    return t.endswith("?") or bool(LT_Q_WORDS.search(t))
+
+def _ack_prefix(user_text: str) -> str:
+    if len((user_text or "").strip()) <= 3:
+        return ""
+    if any(w in (user_text or "").lower() for w in ["ačiū","aciu","ok","gerai","supratau"]):
+        return "Ačiū. "
+    return "Supratau. "
+
+# === Future-interest helpers ===
+def _assistant_future_probe_asked(history: List[Dict[str,str]]) -> bool:
+    h = " ".join((m["content"] or "").lower() for m in history if m["role"] == "assistant")
+    return "ateit" in h  # catches "ateityje", "ateičiai", etc.
+
+def _user_future_yes(text: str) -> bool:
+    t = (text or "").lower()
+    return any(w in t for w in ["taip", "tiktų", "tiktu", "norėčiau", "noreciau", "gal", "galbūt", "galbut", "būtų", "butu", "ateityje", "vėliau", "veliau"])
+
+def _should_probe_future(plan: dict, history: List[Dict[str,str]], user_text: str) -> bool:
+    return (plan.get("job_interest") == "no"
+            and not _is_hard_stop(user_text)
+            and plan.get("future_interest") in {"unknown","unsure"}
+            and not _assistant_future_probe_asked(history))
+
+# --- Last-assistant question classifier (turn-local) ---
+def _last_assistant_question_type(history: List[Dict[str, str]]) -> Optional[str]:
+    last = _norm(_last_assistant_text(history))
+    if not last:
+        return None
+    if "ar ateit" in last:
+        return "future_probe"
+    if "ar sis pasiulymas jums aktualus" in last or "ar aktualu" in last:
+        return "interest_check"
+    if "kiek metu patirties" in last:
+        return "years_q"
+    if "nuo kada galetumete pradeti" in last or "koks grafikas tinka" in last:
+        return "availability_q"
     return None
 
-# Phone-only / salary keyword belt guard
-_SAL_KWS = re.compile(r"\b(alga|atlyg|įkain|tarif|mok(at|ėt)|eur|€|rate|pay|klient|lokacij|adresas|tiksli\s+vieta)\w*\b", re.I)
+_AFFIRM_RX = re.compile(r"^\s*(taip|jo|ok|tinka|tiktu|gerai|domina|galiu|nor\w+|butu|būtų)\b", re.I)
+_DECLINE_RX = re.compile(r"^\s*(ne|nedomina|neaktualu|nenoriu|nereikia|dabar\s+ne|kol\s+kas\s+ne)\b", re.I)
+def _is_affirmative(txt: str) -> bool: return bool(_AFFIRM_RX.search((txt or "")))
+def _is_decline(txt: str) -> bool:     return bool(_DECLINE_RX.search((txt or "")))
 
-def _strip_phone_only_if_not_asked(user_text: str, reply: str) -> str:
-    if _SAL_KWS.search(user_text or ""):
-        return reply
-    sents = [s.strip() for s in re.split(r'(?<=[\.\!\?])\s+', reply) if s.strip()]
-    kept = []
-    for s in sents:
-        if _SAL_KWS.search(s):
-            continue
-        kept.append(s)
-    return " ".join(kept) if kept else reply
+# --- Polisher ---
+_BAD_LINES = re.compile(r"(Ar aktualu dabar, ar palikti ateičiai\?)", re.I)
+def _polish(reply: str, history: List[Dict[str,str]], opener_spec: Optional[str]) -> str:
+    if not reply: return reply
+    r = reply.strip()
+    if _identity_already_used(history):
+        r = re.sub(r"\b(C|c)i?a?\s*Valandinis\.?lt\b|\b[Ee]su\s+Valandinis\.?lt\b", "", r).strip(",. ").strip()
+    r = re.sub(r"\b[Ee]su\s+Valandinis\.?lt\b", "Rašau iš Valandinis.lt", r)
+    if "specialist" in r.lower():
+        r = re.sub(r"[Ss]pecialist\w*", (opener_spec or "statybų srityje"), r)
+    r = _BAD_LINES.sub("", r).strip()
+    r = re.sub(r"^(Sveiki,?\s+){2,}", "Sveiki, ", r)
+    if r.count("?") > 1:
+        r = r.split("?")[0] + "?"
+    r = _strip_repeated_value_line(r, history)
+    if re.search(r"[A-Za-z]{3,}", r) and not re.search(r"[ĄČĘĖĮŠŲŪŽąčęėįšųūž]", r):
+        r = "Atsakykite trumpai lietuviškai ir tęsime."
+    return r
 
-# ==== Probe & label controls ====
-_PROBE_PAT = re.compile(r"\b(ką\s+manote\?|kaip\s+manote\?|ką\s+galvojate\?)", re.I)
-_LABEL_BAN_PAT = re.compile(r"\b(atsargus|atsargi|abejojate|nedrįstate)\b", re.I)
-_DECLINE_PAT = re.compile(r"\b(nedomina|nenoriu|ne\s*domina|ne,?\s*ačiū)\b", re.I)
-_MAYBE_LATER_PAT = re.compile(r"\b(gal\s+ateity(je)?|gal\s+v(ė|e)liau|kai\s+bus\s+laisviau)\b", re.I)
+# ==== Close rules (deterministic user-triggered) ====
+TROLL_RX = re.compile(
+    r"\b(šūdas|byb|bybis|pizd|pyzd|nx|nahui|nahuy|debila?s?|idiotas?|lochas?|lauchas?|kvailys|durnius|eik\s+na(ch|x)|fuck|f\*+k|wtf|bitch|asshole)\b",
+    re.I
+)
+CLOSE_RULES = [
+    ("dnc", re.compile(
+        r"\b(stop|ne?be(trukdyk(it)?|rašyk(it)?|siųsk(it)?|junk(it)?))\b|"
+        r"\b(atsisakau|unsubscribe|nebesusisiek(it)?|nenoriu\s+gauti)\b|"
+        r"\b(ištrink(it)?\s+mano\s+numerį|netrukdyk(it)?)\b", re.I),
+     DNC_CLOSE),
+    ("future", re.compile(
+        r"\b(ateityje|vėliau|veliau|gal\s*(vėliau|veliau|ateityje)|kai\s+bus\s+laisviau|dabar\s+ne,?\s*bet|kol\s+kas\s+ne)\b", re.I),
+     FUTURE_CLOSE),
+    ("call", re.compile(
+        r"\b(skambink(it)?|paskambink(it)?|galite\s+paskambinti|paskambinsiu|susiskambinkim)\b|"
+        r"\b(duokit\s+numerį|duok\s+nr|perduok\s+kolegai)\b", re.I),
+     "Puiku — perduosiu kolegai, jis jums paskambins."),
+    ("accept", re.compile(
+        r"\b(taip|jo|ok|tinka|domina|gerai|priimu|galima)\b|"
+        r"\b(galiu\s+dirbti|esu\s+laisvas|pradėti\s+galiu|nuo\s+[\w\-\.]+)\b", re.I),
+     HUMAN_CLOSE),
+    ("wrong", re.compile(
+        r"\b(ne\s*tas\s*numeris|neteisingas\s*numeris|čia\s*ne\s*jis|apsirikot)\b|"
+        r"\b(nesi(u|) aš\s+\w+?ikas|ne\s*elektrikas|ne\s*ta\s*specialybė)\b", re.I),
+     "Atsiprašome už trukdymą — patikslinsime kontaktus. Daugiau nerašysime."),
+    ("troll", TROLL_RX, TROLL_CLOSE),
+]
+def _apply_close_rules(user_text: str) -> Optional[str]:
+    t = user_text or ""
+    for _name, rx, msg in CLOSE_RULES:
+        if rx.search(t):
+            return msg
+    return None
 
-def _assistant_has_probe(history: List[Dict[str,str]]) -> bool:
-    for m in history:
-        if m["role"] == "assistant" and _PROBE_PAT.search(m.get("content") or ""):
-            return True
-    return False
+# Hard-stop detector (mirrors the DNC pattern)
+_HARD_STOP_RX = re.compile(
+    r"\b(stop|ne?be(trukdyk(it)?|rašyk(it)?|siųsk(it)?|junk(it)?))\b|"
+    r"\b(atsisakau|unsubscribe|nebesusisiek(it)?|nenoriu\s+gauti)\b|"
+    r"\b(ištrink(it)?\s+mano\s+numerį|netrukdyk(it)?)\b",
+    re.I
+)
+def _is_hard_stop(txt: str) -> bool:
+    return bool(_HARD_STOP_RX.search(txt or ""))
 
-def _strip_value_line_anywhere(reply: str) -> str:
-    if not reply:
-        return reply
-    parts = [s.strip() for s in re.split(r'(?<=[\.\!\?])\s+', reply) if s.strip()]
-    parts = [p for p in parts if VALUE_LINE.lower() not in p.lower()]
-    return " ".join(parts).strip() if parts else reply
-
-def _strip_probes(reply: str) -> str:
-    parts = [s.strip() for s in re.split(r'(?<=[\.\!\?])\s+', reply) if s.strip()]
-    parts = [p for p in parts if not _PROBE_PAT.search(p)]
-    return " ".join(parts).strip() if parts else reply
-
-# ==== Two-stage protocol: ANALYZER (semantic plan) ====
+# ==== Analyzer (semantics only) ====
 ANALYZER_SYS = """
-You analyze a short SMS chat about construction/trades work for Valandinis.
-Return STRICT JSON (no text) with:
-- interest: one of ["yes","no","unsure","unknown"]
-- intent: one of ["greeting","project_question","direct_question","provide_years","provide_availability","accept","decline","hesitant","unrelated","other"]
-- slots: { "years": null|number, "availability_text": null|string }
-- phone_only_topics: array subset of ["salary","clients","precise_location","contract_terms","schedule_details"]
-- asked_salary: boolean
-- busy_until: null|string        # e.g., "iki lapkričio galo"
-- decline: boolean
-- hesitant: boolean
+You analyze a short Lithuanian SMS thread about a city+trade opening. Return STRICT JSON:
+{
+  "job_interest": "yes" | "no" | "unsure" | "unknown",
+  "future_interest": "yes" | "no" | "unsure" | "unknown",
+  "intent": "identity_question" | "project_question" | "salary_question" | "schedule_question" | "location_question" |
+            "direct_question" | "provide_years" | "provide_availability" | "call_request" |
+            "accept" | "decline" | "hesitant" | "unrelated" | "other",
+  "slots": { "years": null|number, "availability_text": null|string },
+  "asked_salary": boolean,
+  "phone_only_topics": ["salary"|"clients"|"precise_location"|"contract_terms"|"schedule_details"|"age"...],
+  "busy_until": null|string,
+  "hesitant": boolean,
+  "age_question": boolean,
+  "age_value": null|number,
+  "trolling": boolean
+}
+
 Rules:
-- Infer interest: 
-  yes → contains 'taip', 'domina', 'įdomu', clear acceptance; 
-  no → 'ne', 'nedomina', clear refusal; 
-  unsure → 'gal', 'nežinau', 'gal vėliau'; 
-  unknown → none of the above.
-- Treat a project question or request for more details as indicative of interest unless a decline is also present.
-- Detect Lithuanian variants (e.g., 'alga/atlygis/įkainiai', 'nedomina', 'gal vėliau').
-- If user mentions being busy until a date/period, set busy_until and treat availability as known for planning.
+- Genuine questions about job/salary/schedule/location imply interest unless there is an explicit decline.
+- Months/weeks/days experience → years=0.
+- "please call me", "can I call", "paskambinsiu", etc. → intent="call_request".
+- Detect obvious trolling (absurd answers) → trolling=true.
 Return JSON only.
 """
-
 def analyze(user_text: str, short_history: List[Dict[str,str]]) -> dict:
     msgs = [{"role":"system","content":ANALYZER_SYS}]
     msgs += short_history[-6:] if short_history else []
@@ -261,41 +386,46 @@ def analyze(user_text: str, short_history: List[Dict[str,str]]) -> dict:
     except Exception:
         obj = {}
     plan = {
-        "interest": (obj.get("interest") or "unknown"),
+        "job_interest": (obj.get("job_interest") or "unknown"),
+        "future_interest": (obj.get("future_interest") or "unknown"),
         "intent": (obj.get("intent") or "other"),
         "slots": obj.get("slots") or {"years": None, "availability_text": None},
-        "phone_only_topics": obj.get("phone_only_topics") or [],
         "asked_salary": bool(obj.get("asked_salary") or False),
+        "phone_only_topics": obj.get("phone_only_topics") or [],
         "busy_until": obj.get("busy_until"),
-        "decline": bool(obj.get("decline") or False),
         "hesitant": bool(obj.get("hesitant") or False),
+        "age_question": bool(obj.get("age_question") or False),
+        "age_value": obj.get("age_value"),
+        "trolling": bool(obj.get("trolling") or False),
     }
-    # Post-normalize: project/direct question implies interest unless decline
-    if not plan["decline"] and plan["interest"] in ("unknown","unsure"):
-        if plan["intent"] in ("project_question","direct_question"):
-            plan["interest"] = "yes"
+    yrs = plan["slots"].get("years")
+    if yrs is not None:
+        try: yrs = int(yrs)
+        except Exception: yrs = None
+        if yrs is None or yrs < 0 or yrs > YEAR_MAX: plan["slots"]["years"] = None
+        else: plan["slots"]["years"] = yrs
+    if plan["age_question"] or plan["age_value"] is not None:
+        if "age" not in plan["phone_only_topics"]:
+            plan["phone_only_topics"].append("age")
+    # Analyzer fallback boosted "yes" on questions; keep it.
+    if plan["job_interest"] in ("unknown","unsure") and (plan["intent"] in QUESTION_INTENTS or _looks_like_question(user_text)):
+        plan["job_interest"] = "yes"
     return plan
 
-# ==== Two-stage protocol: GENERATOR (free-form LT SMS) ====
-GENERATOR_SYS = SYSTEM_PROMPT  # reuse strict behavior rules
-
+# ==== Generator ====
+GENERATOR_SYS = SYSTEM_PROMPT
 def generate_sms(plan: dict, short_history: List[Dict[str,str]]) -> str:
     msgs = [{"role":"system","content":GENERATOR_SYS}]
     msgs.append({"role":"user","content":json.dumps({
         "plan": plan,
         "history_tail": [{"role":m["role"],"content":m["content"]} for m in (short_history[-6:] if short_history else [])]
     }, ensure_ascii=False)})
-    r = client.chat.completions.create(model=MODEL, temperature=0.3, messages=msgs, max_tokens=140)
+    r = client.chat.completions.create(model=MODEL, temperature=0.35, messages=msgs, max_tokens=140)
     return (r.choices[0].message.content or "").strip()
 
-# ==== Legacy single-call helpers (kept for compatibility) ====
+# ==== Legacy helpers (kept) ====
 def _call(messages):
-    return client.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        temperature=0.2,
-        max_tokens=120
-    )
+    return client.chat.completions.create(model=MODEL, messages=messages, temperature=0.2, max_tokens=120)
 
 def _build_messages(history: List[Dict[str,str]], user_text: str) -> List[Dict[str,str]]:
     short_hist = history[-12:] if len(history) > 12 else history
@@ -304,116 +434,310 @@ def _build_messages(history: List[Dict[str,str]], user_text: str) -> List[Dict[s
     msgs.append({"role": "user", "content": user_text})
     return msgs
 
-# ==== Main generator (two-stage with interest gate + probe/label/values fixes) ====
+# ==== Close logging helpers ====
+def _log_closed(msisdn: str) -> None:
+    try:
+        print(json.dumps({"ev": "thread_closed", "msisdn": msisdn, "ts": int(time.time())}, ensure_ascii=False), flush=True)
+    except Exception:
+        pass
+
+def _close_and_return(msisdn: str, msg: str, history: List[Dict[str,str]], opener_spec: Optional[str]) -> str:
+    out = _final_sms(_polish(msg, history, opener_spec))
+    _log_closed(msisdn)
+    return out
+
+# ==== Main generator ====
 def generate_reply_lt(ctx: dict, text: str) -> str:
     t_raw = (text or "").strip()
-    if not t_raw:
-        return ""
+    if not t_raw: return ""
 
     t_lower = t_raw.lstrip("\\").lower()
     if t_lower in {"!prompt", "!pf", "##prompt##"}:
         return (f"{PROMPT_SHA} {MODEL}")[:160]
 
-    history = _thread_history((ctx or {}).get("msisdn",""), limit=14)
+    msisdn = (ctx or {}).get("msisdn","")
+    history = _thread_history(msisdn, limit=14)
 
-    if _assistant_has(history, CLOSE_TX.lower()):
+    # If we already closed, swallow any post-close pleasantries and never re-open
+    if _assistant_last_was_close(history):
+        if POSTCLOSE_ACK_RE.search(t_lower):
+            return ""
         return ""
 
-    if re.search(r"\b(robot|bot|dirbtin|ai)\b", t_raw, re.I):
-        return _final_sms("Ne. Ar domintų dirbti per Valandinį?")
+    # Pre-LLM deterministic close rules
+    close_msg = _apply_close_rules(t_raw)
+    if close_msg:
+        return _close_and_return(msisdn, close_msg, history, _extract_opener_specialty(history))
 
-    # Two-stage: 1) analyze
+    # Robot check → identity (no bot mention)
+    if re.search(r"\b(robot|bot|dirbtin|ai)\b", t_raw, re.I):
+        ident = "Rašau iš Valandinis.lt." if not _identity_already_used(history) else ""
+        return _final_sms(_polish(ident or " ", history, _extract_opener_specialty(history)))
+
+    # Analyze semantics
     plan = analyze(t_raw, history)
 
-    # Merge slot memory from history
-    slots_hist = _inferred_slots(history)
-    have_years_hist = bool(slots_hist.get("years"))
-    have_avail_hist = bool(slots_hist.get("availability"))
+    # --- Normalize soft-decline / future hints BEFORE branching
+    if _is_decline(t_raw):
+        plan["job_interest"] = "no"
+    if _user_future_yes(t_raw):
+        plan["future_interest"] = "yes"
 
-    # Compute gating flags passed to generator
+    # --- Map user's short yes/no to the last assistant question (strong override on future probe)
+    last_q = _last_assistant_question_type(history)
+    if last_q == "future_probe":
+        if _is_affirmative(t_raw):
+            plan["future_interest"] = "yes"
+            # Force: answering "taip" to a FUTURE probe is NOT current-interest.
+            if plan.get("intent") != "call_request":
+                plan["job_interest"] = "no"
+        elif _is_decline(t_raw):
+            plan["future_interest"] = "no"
+            plan["job_interest"] = "no"
+    elif last_q == "interest_check":
+        if _is_affirmative(t_raw):
+            plan["job_interest"] = "yes"
+        elif _is_decline(t_raw):
+            plan["job_interest"] = "no"
+
+    # Trolling soft-stop
+    if plan.get("trolling"):
+        return _close_and_return(msisdn, TROLL_CLOSE, history, _extract_opener_specialty(history))
+
+    # Merge slot memory
+    slots_hist = _inferred_slots(history)
+    have_years_hist = slots_hist.get("years") is not None
+    have_avail_hist = slots_hist.get("availability") is not None
     plan["have_years"] = have_years_hist or (plan.get("slots") or {}).get("years") is not None
     plan["have_availability"] = have_avail_hist or bool((plan.get("slots") or {}).get("availability_text"))
-    # If busy_until detected, availability considered known
     if plan.get("busy_until"):
         plan["have_availability"] = True
 
-    # Hard stop on complete info → close
-    if plan["have_years"] and plan["have_availability"]:
-        return _final_sms(CLOSE_TX)
+    opener_spec = _extract_opener_specialty(history)
+    user_trade  = _extract_user_trade(t_raw)
+    plan["opener_specialty"]   = opener_spec
+    plan["user_trade"]         = user_trade
+    plan["specialty_mismatch"] = bool(opener_spec and user_trade and (user_trade != opener_spec))
 
-    # 2) generate natural LT SMS respecting interest gate
+    # === First reply after opener: answer + interest check; never close here ===
+    if (_is_first_user_reply_after_opener(history)
+        and (plan.get("intent") in QUESTION_INTENTS or _looks_like_question(t_raw))):
+        identity = "" if _identity_already_used(history) else "Rašau iš Valandinis.lt. "
+        role_word = opener_spec or "elektriko"
+        if plan.get("intent") == "salary_question":
+            answer = "Ačiū už klausimą — atlygio klausimą patogiausia suderinti telefonu."
+        else:
+            answer = f"{_ack_prefix(t_raw)}Tai darbas {role_word} pozicijoje Klaipėdoje; detales suderinsime telefonu."
+        nxt = " Ar šis pasiūlymas jums aktualus?"
+        msg = (identity + answer + nxt).strip()
+        return _final_sms(_polish(msg, history, opener_spec))
+
+    # === Subsequent Q-first ===
+    if plan.get("intent") in QUESTION_INTENTS or _looks_like_question(t_raw):
+        role_word = opener_spec or "elektriko"
+        if plan.get("intent") == "salary_question":
+            answer = "Ačiū už klausimą — dėl atlygio patogiausia suderinti telefonu, kolega paskambins."
+        else:
+            answer = f"{_ack_prefix(t_raw)}Tai darbas {role_word} pozicijoje; konkrečias sąlygas suderinsime telefonu."
+        if plan.get("job_interest") == "yes":
+            return _close_and_return(msisdn, HUMAN_CLOSE, history, opener_spec)
+        return _final_sms(_polish(answer + " Ar šis pasiūlymas jums aktualus?", history, opener_spec))
+
+    # === Identity question only ===
+    if plan.get("intent") == "identity_question":
+        ident = "Rašau iš Valandinis.lt." if not _identity_already_used(history) else ""
+        follow = " Ar šis pasiūlymas jums aktualus?"
+        return _final_sms(_polish((ident + follow).strip(), history, opener_spec))
+
+    # === Call request ===
+    if plan.get("intent") == "call_request":
+        return _close_and_return(msisdn, "Puiku — perduosiu kolegai, jis jums paskambins.", history, opener_spec)
+
+    # === Interested ===
+    if plan.get("job_interest") == "yes":
+        # If the last question was a FUTURE probe, don't human-close unless they asked to call.
+        if _last_assistant_question_type(history) == "future_probe" and plan.get("intent") != "call_request":
+            plan["job_interest"] = "no"
+        else:
+            if plan["have_years"] and plan["have_availability"]:
+                return _close_and_return(msisdn, HUMAN_CLOSE, history, opener_spec)
+            if plan["have_years"] or plan["have_availability"]:
+                return _close_and_return(msisdn, HUMAN_CLOSE, history, opener_spec)
+            if not plan["have_years"]:
+                q = f"Kiek metų patirties turite kaip {(opener_spec or 'meistras')}?"
+                return _final_sms(_polish(q, history, opener_spec))
+            return _final_sms(_polish("Nuo kada galėtumėte pradėti arba koks grafikas tinka?", history, opener_spec))
+
+    # === Not interested → future probe flow ===
+    if plan.get("job_interest") == "no":
+        # Hard stop → DNC
+        if _is_hard_stop(t_raw):
+            return _close_and_return(msisdn, DNC_CLOSE, history, opener_spec)
+        # Explicit future/maybe → FUTURE close
+        if plan.get("future_interest") == "yes" or _user_future_yes(t_raw):
+            return _close_and_return(msisdn, FUTURE_CLOSE, history, opener_spec)
+        # Probe once if not asked yet
+        if _should_probe_future(plan, history, t_raw):
+            return _final_sms(_polish("Supratau, ačiū. Ar ateityje norėtumėte bendradarbiauti su Valandinis.lt?", history, opener_spec))
+        # Otherwise → DNC
+        return _close_and_return(msisdn, DNC_CLOSE, history, opener_spec)
+
+    # === Neutral/unsure → LLM generation ===
     reply = generate_sms(plan, history)
 
-    # --- Post-processing guards ---
+    # Strip phone-only if not asked
+    if not (plan.get("asked_salary") or plan.get("age_question") or plan.get("age_value") is not None) \
+       and not any(k in plan.get("phone_only_topics", []) for k in ["salary","age"]):
+        sents = [s.strip() for s in re.split(r'(?<=[\.\!\?])\s+', reply) if s.strip()]
+        kept = []
+        for s in sents:
+            if SAL_KWS.search(s) or AGE_Q_PAT.search(s) or AGE_VAL_PAT.search(s):
+                continue
+            kept.append(s)
+        reply = " ".join(kept) if kept else reply
 
-    # Belt guard: drop phone-only details if user didn't ask
-    if not plan.get("asked_salary") and "salary" not in plan.get("phone_only_topics", []):
-        reply = _strip_phone_only_if_not_asked(t_raw, reply)
+    # Enforce slot order
+    if ("kada galėtumėte pradėti" in reply.lower() or "koks grafikas tinka" in reply.lower()):
+        if not plan["have_years"]:
+            reply = f"Kiek metų patirties turite kaip {(opener_spec or 'meistras')}?"
 
-    # Don’t allow availability question before years are known
-    if ("kada galėtumėte pradėti" in reply.lower() or "koks grafikas tinka" in reply.lower()) and not plan["have_years"]:
-        reply = "Kiek metų patirties turite?"
+    return _final_sms(_polish(reply, history, opener_spec))
 
-    # Drop awkward labels like "atsargus/atsargi"
-    reply = _LABEL_BAN_PAT.sub("", reply).strip()
-    reply = re.sub(r"\s{2,}", " ", reply)
-
-    # Remove probe if we've already used a probe in this thread
-    if _assistant_has_probe(history) and _PROBE_PAT.search(reply):
-        reply = _strip_probes(reply)
-
-    # If user declined or said maybe later or intent is unrelated → no probe, no value line
-    raw_lower = t_raw.lower()
-    if _DECLINE_PAT.search(raw_lower) or _MAYBE_LATER_PAT.search(raw_lower) or plan.get("intent") == "unrelated":
-        reply = _strip_probes(reply)
-        reply = _strip_value_line_anywhere(reply)
-
-    # If we are answering a project/direct question (info-seeking), strip value line & probes
-    if plan.get("intent") in ("project_question","direct_question") and not plan.get("hesitant"):
-        reply = _strip_probes(reply)
-        reply = _strip_value_line_anywhere(reply)
-
-    # Deduplicate the value line (historic)
-    reply = _strip_repeated_value_line(reply, history)
-
-    # Only one question max
-    if reply.count("?") > 1:
-        first_q = reply.split("?")[0] + "?"
-        reply = first_q if len(first_q) <= 160 else (first_q[:157] + "…")
-
-    # Enforce Lithuanian heuristic
-    if re.search(r"[A-Za-z]{3,}", reply) and not re.search(r"[ĄČĘĖĮŠŲŪŽąčęėįšųūž]", reply):
-        reply = "Atsakykite trumpai lietuviškai ir tęsime."
-
-    return _final_sms(reply)
-
-# ==== Classifier (unchanged) ====
+# ==== Simple classifier (semantic) ====
 def classify_lt(text: str) -> dict:
     sys = (
-        "Klasifikuok lietuvišką SMS į: 'questions', 'not_interested', arba 'other'. "
-        "Grąžink JSON: {\"intent\": str, \"confidence\": 0..1}. "
-        "Pvz.: 'nedomina' -> not_interested; klausimai apie darbą -> questions; kita -> other. "
-        "Atsakyk tik JSON."
+        "You are a STRICT classifier for Lithuanian SMS about jobs. "
+        "Return exactly one of: 'questions', 'not_interested', 'other'. "
+        "Rules: if the message clearly declines or asks to stop, it's 'not_interested'. "
+        "If it asks a genuine question about the job, it's 'questions'. Otherwise 'other'. "
+        'Reply ONLY with JSON: {"intent": <string>, "confidence": <0..1 number>}.'
     )
-    r = client.chat.completions.create(
-        model=MODEL, temperature=0,
-        messages=[{"role":"system","content":sys},{"role":"user","content":text}],
-        max_tokens=60
-    )
-    content = (r.choices[0].message.content or "").strip()
     try:
-        obj = json.loads(content)
+        r = client.chat.completions.create(
+            model=MODEL, temperature=0,
+            messages=[{"role":"system","content":sys},{"role":"user","content":(text or "")}],
+            max_tokens=60
+        )
+        content = (r.choices[0].message.content or "").strip()
+        try:
+            obj = json.loads(content)
+        except Exception:
+            m = re.search(r"\{.*\}", content, re.S)
+            obj = json.loads(m.group(0)) if m else {}
         intent = (obj.get("intent") or "").lower().strip()
         conf = float(obj.get("confidence") or 0.6)
         if intent not in {"questions", "not_interested", "other"}:
             intent = "other"
-        return {"intent": intent, "confidence": conf}
+        return {"intent": intent, "confidence": max(0.0, min(conf, 1.0))}
     except Exception:
         return {"intent": "other", "confidence": 0.5}
 
+# ==== LLM-DRIVEN OPENER ====
+OPENER_SYS = """
+Write one Lithuanian SMS (≤160 chars) to open a recruiting chat for Valandinis.lt.
+
+Use this structure, fixing endings (city locative, trade nominative in the clause):
+"Sveiki! Čia Valandinis.lt — matome, kad {mieste} turime objektą, kuriame reikalingas {specialybė}. Ar šiuo metu dirbate ar atviri naujam objektui? 🙂"
+
+Constraints:
+- Exactly one greeting. If the model tries to add another greeting or identity later, remove it.
+- No bot/AI mention. No extra details. Output only the final SMS text.
+"""
+def generate_opener_lt(name: str, city: str, specialty: str) -> str:
+    city = (city or "").strip()
+    specialty = (specialty or "").strip()
+    if not city or not specialty:
+        return _final_sms("Sveiki! Čia Valandinis.lt. Ar šiuo metu dirbate ar atviri naujam objektui?")
+    user_payload = json.dumps({"vardas": "", "miestas": city, "specialybė": specialty}, ensure_ascii=False)
+    try:
+        r = client.chat.completions.create(
+            model=MODEL,
+            temperature=0.2,
+            max_tokens=120,
+            messages=[{"role": "system", "content": OPENER_SYS},
+                      {"role": "user", "content": user_payload}]
+        )
+        text = (r.choices[0].message.content or "").strip()
+        text = re.sub(r"^(Sveiki,?\s+){2,}", "Sveiki! ", text)
+        text = text.replace("Sveiki, Sveiki!", "Sveiki!").replace("Sveiki,  ", "Sveiki! ")
+        if text.count("?") > 1:
+            text = text.split("?")[0] + "?"
+        return _final_sms(text)
+    except Exception:
+        fb = f"Sveiki! Čia Valandinis.lt — matome, kad {city} turime objektą, kuriame reikalingas {specialty}. Ar šiuo metu dirbate ar atviri naujam objektui?"
+        return _final_sms(fb)
+
 def project_opener(name: str, city: str, specialty: str) -> str:
-    msg = (
-        f"Sveiki, {name}! Čia Valandinis.lt — {city} turime objektą "
-        f"{specialty} specialistui. Ar šiuo metu dirbate ar esate atviri naujam objektui? 🙂"
+    return generate_opener_lt(name, city, specialty)
+
+# ==== Deterministic thread-level outcome (admin) ====
+def _is_yes(txt: str) -> bool:
+    t = (txt or "").lower()
+    return any(w in t for w in ["taip","domina","įdomu","tinka","gerai","ok","esu atviras","atvira"]) and not _is_no(t)
+
+def _is_no(txt: str) -> bool:
+    t = (txt or "").lower().strip()
+    no_words = ["nedomina","ne, ačiū","ne domina","nebus","nenoriu"]
+    return t == "ne" or any(w in t for w in no_words)
+
+def _is_maybe_future(txt: str) -> bool:
+    t = (txt or "").lower()
+    return any(x in t for x in ["gal ateity","gal vėliau","kai bus laisviau","vėliau gal","ateityje","veliau"])
+
+def classify_thread_outcome(history: List[Dict[str,str]]) -> Dict[str, object]:
+    slots = _inferred_slots(history)
+    years = slots.get("years")
+    availability = slots.get("availability")
+    ctype = _last_close_type(history)
+    if ctype == "human":
+        return {"outcome": "interested", "future_maybe": False, "years": years, "availability": availability}
+    if ctype == "future":
+        return {"outcome": "interested", "future_maybe": True, "years": years, "availability": availability}
+    if ctype in ("dnc", "troll"):
+        return {"outcome": "not_interested", "future_maybe": False, "years": years, "availability": availability}
+    last_user = ""
+    for m in reversed(history):
+        if m.get("role") == "user":
+            last_user = (m.get("content") or "").strip()
+            break
+    future_maybe = _is_maybe_future(last_user)
+    if _is_no(last_user):
+        return {"outcome": "not_interested", "future_maybe": future_maybe, "years": years, "availability": availability}
+    actionable = _looks_like_question(last_user) or _is_yes(last_user) or (years is not None) or (availability is not None)
+    if actionable:
+        return {"outcome": "interested", "future_maybe": future_maybe, "years": years, "availability": availability}
+    return {"outcome": "undecided", "future_maybe": future_maybe, "years": years, "availability": availability}
+
+from typing import Optional as _Optional
+def summarize_thread_kpis(msisdn: str, last_user_text: _Optional[str] = None) -> dict:
+    history = _thread_history(msisdn, limit=50)
+    out = classify_thread_outcome(history)
+
+    interested = (
+        "yes" if out.get("outcome") == "interested"
+        else "no" if out.get("outcome") == "not_interested"
+        else "unsure"
     )
-    return _final_sms(msg)
+    years = out.get("years") if isinstance(out.get("years"), int) else None
+
+    future_interest = "unknown"
+    ctype = _last_close_type(history)
+    if ctype == "future":
+        future_interest = "yes"
+    elif ctype in ("dnc", "troll"):
+        future_interest = "no"
+
+    if future_interest == "unknown" and last_user_text:
+        try:
+            plan = analyze(last_user_text, history)
+            fi = (plan or {}).get("future_interest")
+            if fi in ("yes","no","unsure","unknown"):
+                future_interest = fi
+        except Exception:
+            pass
+    if future_interest == "unknown":
+        future_interest = "yes" if out.get("future_maybe") else (
+            "no" if out.get("outcome") == "not_interested" else "unknown"
+        )
+
+    return {"interested": interested, "future_interest": future_interest, "years": years}
