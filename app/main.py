@@ -677,3 +677,5 @@ async def send_batch(payload: dict, force: bool = Query(False)):
         except Exception as e:
             results.append({"to": item.get("to"), "ok": False, "error": str(e)})
     return {"results": results}
+
+app.state.provider = provider
