@@ -148,8 +148,12 @@ class InfobipProvider:
         Returns a provider id (string). In dry-run or error, returns 'dev-<ts>'.
         """
         dev_id = f"dev-{int(time.time() * 1000)}"
+        log.info("send(): dry_run=%s enabled=%s base=%r sender=%r key_len=%d", self.dry_run, self.is_enabled(), self.api_base, self.sender, len(self.api_key or ""))
+        log.info("send(): dry_run=%s enabled=%s base=%r sender=%r key_len=%d", self.dry_run, self.is_enabled(), self.api_base, self.sender, len(self.api_key or ""))
+        log.info("send(): dry_run=%s enabled=%s base=%r sender=%r key_len=%d", self.dry_run, self.is_enabled(), self.api_base, self.sender, len(self.api_key or ""))
 
         if self.dry_run or not self.is_enabled():
+            log.error("DRYRUN PATH: dry_run=%s enabled=%s base=%r sender=%r key_len=%d", self.dry_run, self.is_enabled(), self.api_base, self.sender, len(self.api_key or ""))
             log.info("[DRY_RUN SEND] to=%s userref=%s body=%r", to, userref, text)
             return dev_id
 
@@ -232,36 +236,17 @@ class InfobipProvider:
 # Backward-compatible module-level helpers (used by older code)
 # --------------------------------------------------------------------
 # We keep one shared instance so env is read once per process.
-_PROVIDER_SINGLETON: Optional[InfobipProvider] = None
 
+# --------------------------------------------------------------------
+# No-cache provider factory (always reflects current env)
+# --------------------------------------------------------------------
 def _provider() -> InfobipProvider:
-    global _PROVIDER_SINGLETON
-    if _PROVIDER_SINGLETON is None:
-        _PROVIDER_SINGLETON = InfobipProvider(dry_run=os.getenv("DRY_RUN", "1") == "1")
-    return _PROVIDER_SINGLETON
+    env_dry = os.getenv("DRY_RUN","1") in ("1","true","True", 1, True)
+    return InfobipProvider(dry_run=env_dry)
 
-
-def send_text(to: str, text: str) -> Dict[str, Any]:
-    """
-    Synchronous-ish façade for legacy callers; wraps async send().
-    Returns {ok: bool, provider_id: str|None, raw: dict} for compatibility.
-    """
-    prov = _provider()
-
-    async def _run():
-        pid = await prov.send(to, text)
-        return pid
-
-    try:
-        pid = asyncio.run(_run())
-    except RuntimeError:
-        # Already in event loop (FastAPI); delegate to thread
-        pid = asyncio.get_event_loop().run_until_complete(_run())
-
-    return {"ok": bool(pid), "provider_id": pid, "raw": {}}
-
-def parse_inbound(payload: Dict[str, Any]) -> List[Dict[str, str]]:
-    """Legacy shape → list of messages."""
-    prov = _provider()
-    msg = prov.parse_mo(payload, {})
-    return [msg] if msg.get("from") or msg.get("text") else []
+# --------------------------------------------------------------------
+# No-cache provider factory (always reflects current env)
+# --------------------------------------------------------------------
+def _provider() -> InfobipProvider:
+    env_dry = os.getenv("DRY_RUN","1") in ("1","true","True", 1, True)
+    return InfobipProvider(dry_run=env_dry)

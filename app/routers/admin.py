@@ -136,8 +136,20 @@ async def admin_send(request: Request, city: str = Form(""), prof: str = Form(""
             results.append({"match_id": m.get("match_id"), "ok": False, "err": "missing to/text"})
             continue
         try:
-            resp = send_sms(to, text, None)
-            results.append({"match_id": m.get("match_id"), "ok": True, "resp": resp})
+            
+log = __import__("logging").getLogger("admin-send");
+p = request.app.state.provider;
+log.info("ADMIN provider: dry_run=%s enabled=%s base=%r sender=%r key_len=%d", p.dry_run, p.is_enabled(), getattr(p,"api_base",None), getattr(p,"sender",None), len(getattr(p,"api_key","")));
+
+log = __import__("logging").getLogger("admin-send");
+p = request.app.state.provider;
+log.info("ADMIN provider: dry_run=%s enabled=%s base=%r sender=%r key_len=%d", p.dry_run, p.is_enabled(), getattr(p,"api_base",None), getattr(p,"sender",None), len(getattr(p,"api_key","")));
+
+log = __import__("logging").getLogger("admin-send");
+p = request.app.state.provider;
+log.info("ADMIN provider: dry_run=%s enabled=%s base=%r sender=%r key_len=%d", p.dry_run, p.is_enabled(), getattr(p,"api_base",None), getattr(p,"sender",None), len(getattr(p,"api_key","")));
+print("ADMIN_SEND using app.state.provider:", type(request.app.state.provider).__name__, "dry_run=", getattr(request.app.state.provider,"dry_run",None)); pid = await request.app.state.provider.send(to, text)
+            results.append({"match_id": m.get("match_id"), "ok": True, "resp": pid})
         except Exception as e:
             results.append({"match_id": m.get("match_id"), "ok": False, "err": str(e)})
 

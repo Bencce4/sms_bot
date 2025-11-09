@@ -28,7 +28,7 @@ app = FastAPI(title="SMS Bot")
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
-app.include_router(admin_router, prefix="/admin")
+app.include_router(admin_router)
 app.include_router(chat_router)
 
 

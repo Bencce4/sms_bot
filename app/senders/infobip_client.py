@@ -4,16 +4,21 @@ from app.util.logger import get_logger
 log = get_logger("senders.infobip")
 
 try:
-    from app.providers.infobip import InfobipProvider, is_enabled
+    from app.providers.infobip import InfobipProvider
 except Exception:
     InfobipProvider = None
     def is_enabled() -> bool:
         return False
 
 async def send_sms_async(to: str, body: str, userref: str | None = None):
-    if InfobipProvider and is_enabled():
-        provider = InfobipProvider(dry_run=True)
-        return await provider.send(to, body, userref=userref)
+    if not InfobipProvider:
+        log.info("DRY RUN send_sms to=%s userref=%s len=%d", to, userref, len(body))
+        return None
+    provider = InfobipProvider(dry_run=(__import__("os").getenv("DRY_RUN","1")=="1"))
+    if not provider.is_enabled():
+        log.info("DRY RUN send_sms (provider disabled) to=%s userref=%s len=%d", to, userref, len(body))
+        return None
+    return await provider.send(to, body, userref=userref)
     else:
         log.info("DRY RUN send_sms to=%s userref=%s len=%d", to, userref, len(body))
         return None
