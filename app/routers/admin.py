@@ -15,7 +15,6 @@ from app.services.storage import (
     save_matches_df, load_matches
 )
 from app.services.matcher import build_matches
-from app.senders.infobip_client import send_sms
 from app.util.logger import get_logger
 
 # Sheets (existing tabs)
@@ -40,7 +39,7 @@ def _get_or_create_thread(db: Session, phone: str) -> Thread:
         return t
     t = Thread(phone=phone, status="open")
     db.add(t)
-    db.commit()         # ensure PK is assigned
+    db.commit()
     db.refresh(t)
     return t
 
@@ -121,7 +120,7 @@ async def admin_open_chats(
                         specialty=spec or "",
                         msg_dir="out",
                         msg_text=opener,
-                        sent_ok=False,                  # <- seeded message, not a real SMS send
+                        sent_ok=False,
                         llm=llm,
                         note="admin_open_chats_seed",
                         model=LLM_MODEL,
@@ -241,6 +240,11 @@ async def admin_send(request: Request, city: str = Form(""), prof: str = Form(""
         and (not prof or m.get("Specialybė", "") == prof)
     ][: max(0, int(limit))]
 
+    # Provider must exist and be live
+    provider = getattr(request.app.state, "provider", None)
+    if provider is None:
+        raise RuntimeError("provider_not_initialized")
+
     results = []
     for m in batch:
         to = str(m.get("Tel. nr", "")).strip()
@@ -249,7 +253,11 @@ async def admin_send(request: Request, city: str = Form(""), prof: str = Form(""
             results.append({"match_id": m.get("match_id"), "ok": False, "err": "missing to/text"})
             continue
         try:
-            resp = send_sms(to, text, None)
+            # Loud trace to prove this path is used
+            log.error("ADMIN_SEND using app.state.provider: cls=%s dry_run=%s",
+                      type(provider).__name__, getattr(provider, "dry_run", None))
+
+            pid = await provider.send(to, text)
 
             # ---- Existing Outreach logging (best-effort) ----
             ensure_headers("Outreach", ["ts_iso","match_id","phone","city","specialty","sms_text","result_ok","error","userref"])
@@ -277,9 +285,8 @@ async def admin_send(request: Request, city: str = Form(""), prof: str = Form(""
                 )
             except Exception as e:
                 log.warning("leads_log_failed phone=%s err=%s", to, e)
-            # ----------------------------------------------------------
 
-            results.append({"match_id": m.get("match_id"), "ok": True, "resp": resp})
+            results.append({"match_id": m.get("match_id"), "ok": True, "resp": pid})
         except Exception as e:
             log.warning("gsheets_outreach_row_failed match_id=%s phone=%s err=%s", m.get("match_id"), to, e)
             results.append({"match_id": m.get("match_id"), "ok": False, "err": str(e)})
