@@ -26,13 +26,6 @@
 
 <p>Total in filter: {{ total }}</p>
 
-<!-- Open selected chats (uses checkboxes below) -->
-<form method="post" action="/admin/open_chats" id="openChatsForm" style="margin:10px 0;">
-  <button type="submit" {% if not rows or rows|length == 0 %}disabled{% endif %}>
-    Open selected chats
-  </button>
-</form>
-
 <table>
   <thead>
     <tr>
@@ -43,7 +36,6 @@
       <th>Miestas</th>
       <th>Specialybė</th>
       <th>Tel. nr</th>
-      <th>sms_text</th>
       <th>Chat</th>
     </tr>
   </thead>
@@ -54,14 +46,13 @@
         <tr>
           <td>
             {% if phone %}
-              <input type="checkbox" name="selected" form="openChatsForm" value="{{ phone|trim }}">
+              <input type="checkbox" name="selected" value="{{ phone|trim }}">
             {% endif %}
           </td>
           <td>{{ m.match_id }}</td>
           <td>{{ m.Miestas }}</td>
           <td>{{ m.Specialybė }}</td>
-          <td>{{ m["Tel. nr"] }}</td>
-          <td>{{ m.sms_text }}</td>
+          <td>{{ phone }}</td>
           <td>
             {% if phone %}
               <a class="btn" href="/admin/chat?phone={{ phone | urlencode }}" target="_blank">Chat</a>
@@ -71,7 +62,7 @@
       {% endfor %}
     {% else %}
       <tr>
-        <td colspan="7" style="text-align:center; color:#666;">
+        <td colspan="6" style="text-align:center; color:#666;">
           No matches found for the current data. Check city/profession or project “Aktualūs”.
         </td>
       </tr>
@@ -79,7 +70,7 @@
   </tbody>
 </table>
 
-<!-- Keep your existing Send flow -->
+<!-- Send respects current filters/limit (checkboxes currently informational) -->
 <form method="post" action="/admin/send" style="margin-top:10px;">
   <input type="hidden" name="city" value="{{ city_sel or '' }}">
   <input type="hidden" name="prof" value="{{ prof_sel or '' }}">

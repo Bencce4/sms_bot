@@ -9,7 +9,9 @@ from sqlalchemy.orm import Session
 
 from app.storage.db import SessionLocal
 from app.storage.models import Thread, Message
-from app.services.llm import project_opener, analyze, PROMPT_SHA, MODEL as LLM_MODEL
+from app.services.llm import (
+    generate_opener_lt, analyze, PROMPT_SHA, MODEL as LLM_MODEL
+)
 from app.services.storage import (
     save_upload, latest_excel_path, load_sheets,
     save_matches_df, load_matches
@@ -42,6 +44,18 @@ def _get_or_create_thread(db: Session, phone: str) -> Thread:
     db.commit()
     db.refresh(t)
     return t
+
+
+def _phone_norm(s: str) -> str:
+    s = (s or "").strip()
+    if not s:
+        return s
+    if s.startswith("+"):
+        return s
+    # If it looks like pure digits and not starting with '+', prepend '+'
+    if s.replace(" ", "").replace("-", "").isdigit():
+        return "+" + s
+    return s
 
 
 # --------------------- open_chats (bulk open) ---------------------
@@ -84,20 +98,21 @@ async def admin_open_chats(
     db = SessionLocal()
     try:
         for row in selected_rows:
-            phone = str(row.get("Tel. nr", "")).strip()
+            phone_raw = str(row.get("Tel. nr", "")).strip()
+            phone = _phone_norm(phone_raw)
             if not phone:
                 continue
 
-            name = (row.get("Vardas") or row.get("Name") or "Sveiki")
-            city = (row.get("Miestas") or "Lietuvoje")
-            spec = (row.get("Specialybė") or "statybos")
+            name = (row.get("Vardas") or row.get("Name") or "").strip()
+            city = (row.get("Miestas") or "").strip() or "Lietuvoje"
+            spec = (row.get("Specialybė") or "").strip() or "statybos"
 
             t = _get_or_create_thread(db, phone)
 
             # Add opener only if thread has no messages yet
             has_msgs = db.query(Message).filter(Message.thread_id == t.id).first() is not None
             if not has_msgs:
-                opener = project_opener(name=name, city=city, specialty=spec)
+                opener = generate_opener_lt(name=name, city=city, specialty=spec)
                 db.add(Message(thread_id=t.id, dir="out", body=opener))
                 db.commit()
 
@@ -178,6 +193,20 @@ def admin_parse(request: Request):
 
     people, projects = load_sheets(path)
     matches_df = build_matches(people, projects)
+
+    # Authoritative opener: generate via LLM, not from sheet
+    # Add/overwrite sms_text column
+    try:
+        if "sms_text" not in matches_df.columns:
+            matches_df["sms_text"] = ""
+        for i, row in matches_df.iterrows():
+            city = (str(row.get("Miestas") or "")).strip()
+            prof = (str(row.get("Specialybė") or "")).strip()
+            opener = generate_opener_lt(name="", city=city, specialty=prof)
+            matches_df.at[i, "sms_text"] = opener
+    except Exception as e:
+        log.warning("llm_opener_generation_failed err=%s", e)
+
     save_matches_df(matches_df)
 
     records = load_matches()
@@ -209,6 +238,13 @@ def admin_parse(request: Request):
 @router.post("/admin/preview", response_class=HTMLResponse)
 async def admin_preview(request: Request, city: str = Form(""), prof: str = Form(""), limit: int = Form(20)):
     matches = load_matches()
+
+    # Ensure every row has sms_text; generate on the fly if missing (belt & suspenders)
+    for m in matches:
+        if not (m.get("sms_text") or "").strip():
+            opener = generate_opener_lt("", (m.get("Miestas") or ""), (m.get("Specialybė") or ""))
+            m["sms_text"] = opener
+
     filt = [
         m for m in matches
         if (not city or m.get("Miestas", "") == city)
@@ -247,24 +283,27 @@ async def admin_send(request: Request, city: str = Form(""), prof: str = Form(""
 
     results = []
     for m in batch:
-        to = str(m.get("Tel. nr", "")).strip()
-        text = (m.get("sms_text") or m.get("Text") or "").strip()
+        to_raw = str(m.get("Tel. nr", "")).strip()
+        to = _phone_norm(to_raw)
+        # Use ONLY the LLM opener
+        text = (m.get("sms_text") or "").strip()
+
         if not to or not text:
             results.append({"match_id": m.get("match_id"), "ok": False, "err": "missing to/text"})
             continue
         try:
-            # Loud trace to prove this path is used
-            log.error("ADMIN_SEND using app.state.provider: cls=%s dry_run=%s",
-                      type(provider).__name__, getattr(provider, "dry_run", None))
-
+            log.info("ADMIN_SEND using provider=%s dry_run=%s", type(provider).__name__, getattr(provider, "dry_run", None))
             pid = await provider.send(to, text)
 
-            # ---- Existing Outreach logging (best-effort) ----
-            ensure_headers("Outreach", ["ts_iso","match_id","phone","city","specialty","sms_text","result_ok","error","userref"])
-            ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            row = [ts, m.get("match_id"), to, m.get("Miestas"), m.get("Specialybė"), text, True, "", None]
-            append_rows("Outreach", [row])
-            log.info("gsheets_outreach_row_written match_id=%s phone=%s", m.get("match_id"), to)
+            # ---- Outreach logging (best-effort) ----
+            try:
+                ensure_headers("Outreach", ["ts_iso","match_id","phone","city","specialty","sms_text","result_ok","error","userref"])
+                ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                row = [ts, m.get("match_id"), to, m.get("Miestas"), m.get("Specialybė"), text, True, "", None]
+                append_rows("Outreach", [row])
+                log.info("gsheets_outreach_row_written match_id=%s phone=%s", m.get("match_id"), to)
+            except Exception as e:
+                log.warning("gsheets_outreach_row_failed match_id=%s phone=%s err=%s", m.get("match_id"), to, e)
 
             # ---- Leads log for admin batch send (real SMS) ----
             try:
@@ -288,7 +327,6 @@ async def admin_send(request: Request, city: str = Form(""), prof: str = Form(""
 
             results.append({"match_id": m.get("match_id"), "ok": True, "resp": pid})
         except Exception as e:
-            log.warning("gsheets_outreach_row_failed match_id=%s phone=%s err=%s", m.get("match_id"), to, e)
             results.append({"match_id": m.get("match_id"), "ok": False, "err": str(e)})
 
     ok = sum(1 for r in results if r["ok"])
