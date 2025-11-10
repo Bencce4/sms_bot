@@ -267,52 +267,82 @@ async def admin_preview(request: Request, city: str = Form(""), prof: str = Form
         },
     )
 
-@router.post("/admin/send", response_class=HTMLResponse)
-async def admin_send(request: Request, city: str = Form(""), prof: str = Form(""), limit: int = Form(20)):
-    matches = load_matches()
-    batch = [
-        m for m in matches
-        if (not city or m.get("Miestas", "") == city)
-        and (not prof or m.get("Specialybė", "") == prof)
-    ][: max(0, int(limit))]
+from typing import List, Optional
+from fastapi import Form
+from app.services.llm import generate_opener_lt, analyze, PROMPT_SHA, MODEL as LLM_MODEL
 
-    # Provider must exist and be live
+@router.post("/admin/send", response_class=HTMLResponse)
+async def admin_send(
+    request: Request,
+    city: str = Form(""),
+    prof: str = Form(""),
+    limit: int = Form(20),
+    selected: Optional[List[str]] = Form(default=None),   # <- NEW
+):
+    matches = load_matches()
+
+    # If checkboxes were ticked, only send to those phones
+    by_phone = {}
+    for m in matches:
+        ph = str(m.get("Tel. nr", "")).strip()
+        if ph:
+            by_phone[ph] = m
+
+    if selected:
+        chosen = [by_phone[p] for p in selected if p in by_phone]
+        batch = chosen[: max(0, int(limit))]
+    else:
+        batch = [
+            m for m in matches
+            if (not city or m.get("Miestas", "") == city)
+            and (not prof or m.get("Specialybė", "") == prof)
+        ][: max(0, int(limit))]
+
     provider = getattr(request.app.state, "provider", None)
     if provider is None:
         raise RuntimeError("provider_not_initialized")
 
+    # loud log to verify live vs dry
+    log.error("ADMIN_SEND provider=%s dry_run=%s",
+              type(provider).__name__, getattr(provider, "dry_run", None))
+
     results = []
     for m in batch:
-        to_raw = str(m.get("Tel. nr", "")).strip()
-        to = _phone_norm(to_raw)
-        # Use ONLY the LLM opener
-        text = (m.get("sms_text") or "").strip()
+        to   = str(m.get("Tel. nr", "")).strip()
+        name = (m.get("Vardas") or m.get("Name") or "").strip()
+        city_v = (m.get("Miestas") or "").strip()
+        spec = (m.get("Specialybė") or "").strip()
 
-        if not to or not text:
-            results.append({"match_id": m.get("match_id"), "ok": False, "err": "missing to/text"})
+        if not to or not spec:
+            results.append({"match_id": m.get("match_id"), "ok": False, "err": "missing to/spec"})
             continue
+
+        # Build opener via LLM every time
         try:
-            log.info("ADMIN_SEND using provider=%s dry_run=%s", type(provider).__name__, getattr(provider, "dry_run", None))
+            text = generate_opener_lt(name=name, city=city_v, specialty=spec)
+        except Exception as e:
+            results.append({"match_id": m.get("match_id"), "ok": False, "err": f"opener_fail: {e}"})
+            continue
+
+        try:
             pid = await provider.send(to, text)
 
-            # ---- Outreach logging (best-effort) ----
+            # Outreach sheet (best-effort)
             try:
                 ensure_headers("Outreach", ["ts_iso","match_id","phone","city","specialty","sms_text","result_ok","error","userref"])
                 ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-                row = [ts, m.get("match_id"), to, m.get("Miestas"), m.get("Specialybė"), text, True, "", None]
-                append_rows("Outreach", [row])
-                log.info("gsheets_outreach_row_written match_id=%s phone=%s", m.get("match_id"), to)
+                append_rows("Outreach", [[ts, m.get("match_id"), to, city_v, spec, text, True, "", None]])
             except Exception as e:
                 log.warning("gsheets_outreach_row_failed match_id=%s phone=%s err=%s", m.get("match_id"), to, e)
 
-            # ---- Leads log for admin batch send (real SMS) ----
+            # Leads log (best-effort)
             try:
                 llm = analyze(text, [])
                 write_lead_row(
-                    name=(m.get("Vardas") or m.get("Name") or ""),
+                    name=name,
                     phone=to,
-                    city=(m.get("Miestas") or ""),
-                    specialty=(m.get("Specialybė") or ""),
+                    city=city_v,
+                    specialty=spec,
                     msg_dir="out",
                     msg_text=text,
                     sent_ok=True,
@@ -329,9 +359,6 @@ async def admin_send(request: Request, city: str = Form(""), prof: str = Form(""
         except Exception as e:
             results.append({"match_id": m.get("match_id"), "ok": False, "err": str(e)})
 
-    ok = sum(1 for r in results if r["ok"])
-    fail = len(results) - ok
-    return templates.TemplateResponse(
-        "send_results.html",
-        {"request": request, "results": results, "ok": ok, "fail": fail},
-    )
+    ok, fail = sum(r["ok"] for r in results), sum(not r["ok"] for r in results)
+    return templates.TemplateResponse("send_results.html",
+        {"request": request, "results": results, "ok": ok, "fail": fail})

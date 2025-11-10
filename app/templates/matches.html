@@ -46,7 +46,8 @@
         <tr>
           <td>
             {% if phone %}
-              <input type="checkbox" name="selected" value="{{ phone|trim }}">
+              <!-- bind checkbox to the send form -->
+              <input type="checkbox" name="selected" form="sendForm" value="{{ phone|trim }}">
             {% endif %}
           </td>
           <td>{{ m.match_id }}</td>
@@ -70,10 +71,10 @@
   </tbody>
 </table>
 
-<!-- Send respects current filters/limit (checkboxes currently informational) -->
-<form method="post" action="/admin/send" style="margin-top:10px;">
-  <input type="hidden" name="city" value="{{ city_sel or '' }}">
-  <input type="hidden" name="prof" value="{{ prof_sel or '' }}">
+<!-- Send: now receives selected[]=... + current filters -->
+<form method="post" action="/admin/send" id="sendForm" style="margin-top:10px;">
+  <input type="hidden" name="city"  value="{{ city_sel or '' }}">
+  <input type="hidden" name="prof"  value="{{ prof_sel or '' }}">
   <input type="hidden" name="limit" value="{{ limit }}">
   <button type="submit" class="btn" {% if not rows or rows|length == 0 %}disabled{% endif %}>Send</button>
 </form>
@@ -82,7 +83,8 @@
   const chkAll = document.getElementById('chkAll');
   if (chkAll) {
     chkAll.addEventListener('change', () => {
-      document.querySelectorAll('input[type=checkbox][name=selected]').forEach(cb => cb.checked = chkAll.checked);
+      document.querySelectorAll('input[type=checkbox][name=selected]')
+        .forEach(cb => cb.checked = chkAll.checked);
     });
   }
 </script>
