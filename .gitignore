@@ -24,3 +24,7 @@ creds/
 __pycache__/
 *.pyc
 .DS_Store
+.env
+creds/*
+!creds/.keep
+docker-compose.server.yml
